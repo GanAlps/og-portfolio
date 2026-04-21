@@ -1,0 +1,77 @@
+---
+title: "The State of Generative AI in 2025: What's Actually Changed"
+subtitle: "From longer context windows to reasoning models — a practitioner's take on what matters"
+summary: "A look at the most significant advances in generative AI over the past year, from reasoning models and multimodal capabilities to inference efficiency and what these shifts mean for engineers building on top of foundation models."
+publishedAt: "2025-04-10"
+tag: "AI"
+images: []
+team: []
+---
+
+## Introduction
+
+It's been a relentless eighteen months in generative AI. If you work anywhere near foundation models — building on top of them, serving them, or fine-tuning them — it can feel like you're drinking from a firehose. New model families, new inference paradigms, new ways to think about context. A lot of it is noise. Some of it genuinely changes how you build.
+
+This post is a practitioner's attempt to cut through that noise. Not a survey of every paper or every model release, but a look at the shifts that actually matter when you're building production systems on top of Gen AI.
+
+## Reasoning Models Change the Tradeoff Space
+
+The biggest architectural shift of the past year isn't a new model size or a new modality. It's the emergence of reasoning models — systems that spend compute at inference time thinking through a problem step-by-step before producing an answer.
+
+OpenAI's o-series, Anthropic's extended thinking mode, and Google's Gemini thinking variants all represent the same underlying insight: for hard problems, it's often better to spend more tokens *reasoning* than to spend more parameters *memorizing*. This changes the cost calculus for inference significantly. A reasoning model might use 10x the tokens of a standard completion, but solve problems that a much larger base model would get wrong.
+
+For engineers, this means latency and cost profiles are no longer primarily a function of model size. You now have a dial — compute budget per query — and the right setting depends heavily on the task. Factual lookup? Cheap base model, fast. Complex multi-step planning or code generation? A reasoning model at higher compute budget beats a larger base model on quality while sometimes being cheaper per correct answer.
+
+## Context Windows Are Now Genuinely Long
+
+A year ago, 128K tokens felt like a ceiling that rarely got used in practice because performance degraded badly in the middle of long contexts. In 2025 that's largely a solved problem. Gemini 1.5 Pro proved that million-token contexts were possible with acceptable quality. Claude 3.5's improvements to long-context recall made the capability production-usable. GPT-4o handles 128K with consistent attention across the full window.
+
+The practical implication is that naive RAG pipelines — chunk, embed, retrieve — are no longer the default answer for every long-document problem. For many use cases you can now stuff the whole document in and let the model find what it needs. RAG still wins on dynamic knowledge, on very large corpora, and on latency-sensitive applications where you can't afford to process megabytes of context every request. But the question "do I need RAG or can I just use a long context?" is now legitimately worth asking for each use case.
+
+## Multimodality Is Becoming Table Stakes
+
+The line between language models and vision models has blurred to the point of irrelevance for most applications. GPT-4o, Gemini 1.5, and Claude 3.5 Sonnet all handle images natively and with high quality. The more interesting development is video and audio understanding reaching production quality — Gemini 1.5 Pro's native video understanding opens genuinely new application categories.
+
+For builders, the interesting question is no longer "can the model handle images" but "what does native multimodality enable that wasn't possible before." Document understanding is the obvious one — feeding a PDF as an image rather than doing complex layout parsing. But richer use cases are emerging: UI grounding (the model sees a screenshot and can interact with it), manufacturing defect detection, medical imaging assistance at the draft-answer level. The bottleneck has shifted from model capability to finding the right problems.
+
+## Small Models Have Gotten Surprisingly Capable
+
+Perhaps the most underappreciated trend: the capability gap between large frontier models and small deployable models has compressed dramatically. Meta's Llama 3 8B outperforms Llama 2 70B on most benchmarks. Microsoft's Phi-3 Mini achieves GPT-3.5-class performance at a fraction of the size. Mistral 7B and its instruction-tuned variants punch far above their weight class.
+
+This matters for anyone thinking about deployment costs and data privacy. Many tasks that required GPT-4 twelve months ago can now be handled by a small model running on a single GPU — or on-device. The frontier models are still the right choice for the hardest reasoning tasks, but a lot of real-world workloads don't need frontier models. The default should be: start with the smallest model that works for your task, and step up only when you have a demonstrated quality gap.
+
+## Inference Efficiency Has Become a First-Class Problem
+
+As model usage scales, inference cost and latency have become serious engineering problems. A few techniques have moved from research into widespread production use:
+
+**Speculative decoding** — a small draft model proposes tokens, a large verifier model accepts or rejects them in parallel — is now supported natively in several serving frameworks and can deliver 2–3x throughput improvements with no quality loss.
+
+**Quantization** has matured. INT4 and INT8 quantized models running on consumer GPUs are now close to indistinguishable from FP16 on most tasks. GGUF and the llama.cpp ecosystem have made this accessible, and cloud providers are deploying quantized variants of their own models to improve cost efficiency.
+
+**Continuous batching and paged attention** (the core insights behind vLLM) are now table-stakes in any serious inference stack. If you're building on SageMaker, BedRock, or managed inference APIs, you're already benefiting from these. If you're running your own stack, vLLM, TGI, and TensorRT-LLM all implement these well.
+
+**KV cache management** is the next frontier. For long-context and multi-turn applications, the KV cache dominates memory usage. Prefix caching, sliding window attention, and compressed KV representations are all active areas where we'll see practical improvements in the next year.
+
+## Fine-Tuning Has Become More Accessible — and More Nuanced
+
+PEFT techniques — LoRA, QLoRA, and their variants — have made fine-tuning accessible to teams without massive GPU budgets. You can meaningfully fine-tune a 7B or 13B parameter model on a single A100 with QLoRA in hours. For smaller models on specific domains, this often beats prompt engineering and RAG on both quality and latency.
+
+The nuance is that fine-tuning remains a double-edged sword. It's easy to overfit to your training distribution. It's easy to tune away capabilities you didn't intend to affect. And the evaluation problem is hard — a model that scores well on your fine-tuning eval set can still behave badly in the long tail of production inputs.
+
+Continued pre-training — training on domain-specific unlabeled text before instruction tuning — has emerged as a more robust path for true domain adaptation. It requires more data and compute than LoRA fine-tuning, but the resulting models generalize better and forget less. For organizations with rich proprietary text corpora, it's worth the investment.
+
+## What This Means for Engineers
+
+A few practical conclusions from working at the intersection of these trends:
+
+**Pick your model for the task, not for prestige.** Frontier models are expensive. Small models are fast and cheap. For most production workloads you should be using the smallest model that meets your quality bar, and re-evaluating that choice as small models keep improving.
+
+**Inference architecture matters as much as model choice.** The gap between a naively deployed model and one with speculative decoding, continuous batching, and KV cache optimization can be 5–10x in cost and latency. If you're serving at any meaningful scale, your inference stack deserves as much engineering attention as your model selection.
+
+**Evaluation is the bottleneck.** The hardest part of building reliable Gen AI products is not training or serving — it's knowing whether your model is actually doing what you want. Invest in evals early. Build them like you'd build tests: specific, automated, and run continuously. The teams shipping reliable Gen AI products are the ones who've cracked evaluation.
+
+**Data is still the moat.** All the capability improvements above are available to everyone. What isn't available to everyone is your data. High-quality proprietary datasets for fine-tuning and retrieval are the durable competitive advantage — more so than model selection or prompt engineering tricks.
+
+---
+
+This is a living area and things will look different again in six months. But the core engineering principles — instrument everything, evaluate rigorously, prefer simplicity, right-size your models — hold regardless of which model is on top of the leaderboard this week.
