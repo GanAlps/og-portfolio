@@ -45,7 +45,7 @@ const home: Home = {
   label: "Home",
   title: `${person.name} — Senior SDE`,
   description: `Software engineer based in Seattle building scalable systems and great developer experiences.`,
-  headline: <>Engineering software that scales.</>,
+  headline: <>The future belongs to the curious.</>,
   featured: {
     display: false,
     title: <></>,
@@ -53,9 +53,11 @@ const home: Home = {
   },
   subline: (
     <>
-      I'm Osho, a Senior SDE based in{" "}
+      Senior SDE based in{" "}
       <Text as="span" size="xl" weight="strong">Seattle</Text>.
-      {" "}I build reliable, high-performance systems and enjoy working across the full stack — from distributed backends to polished UIs.
+      {" "} with 10+ years of experience in distributed systems and AI infrastructure.
+      I believe that behind every scalable system and every AI breakthrough is a simple, 
+      child-like curiosity to see what's possible. Hi! I'm Osho, and I build with curiosity.
     </>
   ),
 };
@@ -81,12 +83,13 @@ const about: About = {
     title: "Introduction",
     description: (
       <>
-        I'm a Senior Software Development Engineer at Amazon Web Services, based in Seattle. I
-        specialize in building large-scale distributed systems for ML inference and training
-        infrastructure, working on the cutting edge of generative AI at cloud scale. I care deeply
-        about system reliability, developer experience, and writing software that stands the test of
-        time. Outside of work I enjoy exploring new technologies, contributing to open source, and
-        building side projects that scratch my own itches.
+        With over a decade of experience at Amazon, I have architected solutions across diverse domains, 
+        including AI infrastructure, fashion innovation, and supply chain optimization. My journey began 
+        with a fundamental curiosity about how global tech products operate at scale, a drive that led 
+        me to master large-scale distributed systems while consistently raising the bar for reliability, 
+        operational excellence, and developer experience. In recent years, my focus has shifted to building 
+        cutting-edge infrastructure that defines generative AI today. As we enter this new era, the explorer 
+        in me is energized to discover what the next decade of technology will make possible.
       </>
     ),
   },
@@ -95,29 +98,119 @@ const about: About = {
     title: "Work Experience",
     experiences: [
       {
-        company: "Amazon Web Services",
-        timeframe: "2021 - Present",
+        company: "Amazon Web Services - US",
+        timeframe: "2024 - Present",
         role: "Senior Software Development Engineer",
         achievements: [
           <>
-            Led the design and delivery of a high-throughput inference serving platform for
-            SageMaker, reducing p99 latency by 40% and supporting hundreds of billions of
-            monthly inference requests across foundation model workloads.
+            Model Customization: Launched Serverless Model Customization on Amazon SageMaker as 
+            part of AWS re:Invent 2025, enabling customers to perform scalable and cost-efficient 
+            fine-tuning of foundation models using standardized recipes for supervised 
+            fine-tuning (SFT) and preference optimization methods including RLAIF, DPO, PPO, and GRPO. 
+            The solution supports PEFT optimizations: LoRA and QLoRA and scales seamlessly across 
+            multiple instances using tensor, pipeline, and data parallelism. In addition to 
+            serving as the cross-team security lead for the overall initiative, I led the 
+            workstreams of the recipe management framework and the model evaluation system, 
+            enabling customers to assess customized model quality using standardized benchmarks, 
+            custom metrics, and LLM-as-a-judge (LLM-AJ) evaluations, with integrated MLflow support 
+            for visualization, experiment tracking, and comparison.
           </>,
           <>
-            Architected a distributed model-loading pipeline for large generative AI models,
-            cutting cold-start times by 60% through parallel S3 streaming and memory-mapped
-            weight sharding across GPU fleets.
+            Nova Forge: Launched Nova Forge on SageMaker, enabling customers to do Continued pre-training 
+            on nova models with data mixing. I was responsible to make most critical infra changes to 
+            SM HyperPod to enable secure CPT with Nova Models. Earned org level recognition for delivering
+            fast on an away team project collaborating across 4 teams.
           </>,
           <>
-            Drove a cross-team initiative to standardize SageMaker's training job scheduler,
-            improving GPU cluster utilization by 25% and reducing job queue wait times for
-            customers running large-scale fine-tuning workloads.
+            Inference Performance Benchmarking: Delivered a fully managed LLM performance benchmarking 
+            platform that enables customers to evaluate and compare model-hosting and 
+            optimization strategies across diverse hardware configurations to identify the 
+            optimal price-performance setup for LLM inference. The tool measures key performance 
+            metrics such as TTFT, TPOT, inter-token latency, throughput, etc. and supports comparative 
+            analysis across optimization techniques including speculative decoding, continuous 
+            batching, KV-cache optimizations (e.g., Paged Attention, MQA, GQA, FlashAttention), and 
+            quantization. The platform automatically provisions models with the selected optimizations 
+            on compatible hardware, generates detailed performance reports, and provides heuristic-based 
+            recommendations aligned with workload characteristics and user-defined constraints.
+          </>,
+        ],
+        images: [],
+      },
+      {
+        company: "Amazon Development Center - US",
+        timeframe: "2018 - 2023",
+        role: "Senior Software Development Engineer",
+        achievements: [
+          <>
+            Joined Amazon The Drop (fashion org) as a founding engineer. Taking product from PRFAQ
+            stage to launch and scaling it to be one of the largest revenue stream for amazon fashion.
           </>,
           <>
-            Mentored a team of 4 engineers, established code-review standards and on-call
-            runbooks, and reduced production incident MTTR by 35% through improved observability
-            instrumentation with CloudWatch and distributed tracing.
+            Solved complex supply chain problems to enable made-on-demand ordering on amazon ecosystem.
+            Enabled a fresh look-driven UI for influencer driven content. Integrated with instagram APIs
+            to manage brand's instagram page and inventory in automated way.
+          </>,
+          <>
+            Built Design potal from scratch to enable influencers, manufacturers, and amazon representatives
+            collaborate on mood boards, taking product from moodboard to ASIN readiness.
+          </>,
+          <>
+            Scaled the system for sudden burst of ~10K TPS for celebrity launches.
+          </>,
+          <>
+            Promoted to Senior SDE in Q1 2021.
+          </>,
+        ],
+        images: [],
+      },
+      {
+        company: "Amazon Development Center - India",
+        timeframe: "2025 - 2017",
+        role: "Software Development Engineer",
+        achievements: [
+          <>
+            Worked in Suppy Chain Optimization Technologies (SCOT) org on building systems to Help
+            vendor managers and in-stock managers make buy decisions and place orders to vendors.
+          </>,
+          <>
+            Built Specialzed Buying System from scratch which focussed on buying recommendations for
+            special cases like end of life, new product launches, staged buying, etc.
+          </>,
+          <>
+            Built Commitment management system from scartch to enable softlines commitment and buying
+            cycles in streamlined way. Converting offline commitments to intelligent recommendation
+            based buys and streamlined via defined process tracked in our system.
+          </>,
+          <>
+            Promtoed from SDE-1 to SDE-2 in under 2 years.
+          </>,
+        ],
+        images: [],
+      },
+      {
+        company: "Multiple",
+        timeframe: "2013 - 2015",
+        role: "Research Assistant/Intern",
+        achievements: [
+          <>
+            Nanyang Technological University - Spring 2015: Worked with Prof. Chng-eng Siong and his team
+            on speaker verification models.
+          </>,
+          <>
+            Carnegie Mellon University (remote)- Fall 2014: Worked with Associate Scientist Judith Gelernter on
+            spatio-temporal analysis of texts. Helper her team to build datasets used to train and text
+            their new NLP models.
+          </>,
+          <>
+            Hong Kong University of Science and Technology - Summer 2014: Research assistant at Human Language
+            Technology Center, under mentorship of Prof. Dekai Wu. Worked on extracting 1000 dimensional
+            features vectors from real time audio stream.
+          </>,
+          <>
+            Changwon National University - Summer 2013: Internship at Speech Signal Processing at Signal and 
+            Acoustic Signal Processing Lab (SASPL) under mentorship of Prof. Cheolwoo Jo. Studied 
+            formant change in 3-vowel intercommenctions using Klatt synthetizer, and inverse 
+            filtering of speech data. Published research paper: https://ieeexplore.ieee.org/document/6743877
           </>,
         ],
         images: [],
@@ -129,7 +222,7 @@ const about: About = {
     title: "Education",
     institutions: [
       {
-        name: "IIT BHU — Varanasi, India",
+        name: "Indian Institute of Technology BHU — Varanasi, India",
         description: <>Bachelor of Technology in Electronics Engineering.</>,
       },
     ],

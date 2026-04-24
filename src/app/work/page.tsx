@@ -31,7 +31,14 @@ export default function Work() {
       <Heading marginBottom="l" variant="heading-strong-xl" align="center">
         {work.title}
       </Heading>
-      <Projects />
+      <Heading as="h2" marginBottom="m" paddingX="l" variant="heading-strong-l">
+        Projects at Amazon
+      </Heading>
+      <Projects category="amazon" />
+      <Heading as="h2" marginBottom="m" paddingX="l" variant="heading-strong-l">
+        Personal Projects
+      </Heading>
+      <Projects category="personal" />
     </Column>
   );
 }

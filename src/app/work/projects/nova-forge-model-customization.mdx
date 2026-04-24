@@ -1,8 +1,9 @@
 ---
 title: "Nova Forge Model Customization"
-summary: "Allow users to use proprietary Nova Models to do continued fine tuning on SageMaker HyperPod with data-mixing."
-publishedAt: "2025-01-15"
-tag: "AWS"
+summary: "Enabled SageMaker users to use proprietary Nova Models to do continued pre-training on SageMaker HyperPod with data-mixing."
+publishedAt: "2025-07-15"
+tag: "AWS-SageMaker"
+category: "amazon"
 images: []
 team: []
 link: "https://aws.amazon.com/nova/forge/"
@@ -10,9 +11,14 @@ link: "https://aws.amazon.com/nova/forge/"
 
 ## Overview
 
-Nova Forge Model Customization is a generally available AWS feature that enables customers to fine-tune Amazon's proprietary Nova foundation models on SageMaker HyperPod using continued pre-training with data-mixing.
+Nova Forge Model Customization is a generally available AWS feature that enables customers to continued pre-training (CPT) on Amazon's proprietary Nova foundation models on SageMaker HyperPod with/without data-mixing.
 
-I was part of the core engineering team that designed and built this feature, working across the training orchestration and control plane layers.
+While model fine-tuning is commonly available for most models on AWS. CPT on propriatary models was not available anywhere. 
+This was first of a kind solution to allow users to perform CPT on propriatary models while proctecting IP data and model weights from customer and also protecting customer's data and techniques from model owner and amazon.
+
+Security was the most important aspect of this product. I worked on core engineering team that designed and built this feature on SageMaker Hyperpod, enabling CPT for IP protected models.
+
+I worked on this project as away team member and got org wide recognistion for my leadership and fast delivery despite being new to HyperPod.
 
 ## Technologies
 

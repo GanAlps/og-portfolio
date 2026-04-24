@@ -1,0 +1,23 @@
+---
+title: "LLM Inference Performance Benchmarking"
+summary: "Delivered a fully managed LLM inference performance benchmarking tool, that evaluates various model hosting configurations in parallel and recommend optimal configuration for given use-case."
+publishedAt: "2024-06-30"
+tag: "AWS-SageMaker"
+category: "amazon"
+images: []
+team: []
+link: ""
+---
+
+## Overview
+
+Delivered a fully managed LLM performance benchmarking system that enables customers to evaluate and compare model-hosting and optimization strategies across diverse hosting configurations to identify optimal price-performance setup for LLM inference. 
+
+The tool measures key performance metrics such as TTFT, TPOT, inter-token latency, throughput, etc. and supports comparative analysis across optimization techniques including speculative decoding, continuous batching, KV-cache optimizations (e.g., Paged Attention, MQA, GQA, FlashAttention), and quantization. 
+The platform automatically provisions models with the selected optimizations on compatible hardware, generates detailed performance reports, and provides heuristic-based recommendations aligned with workload characteristics and user-defined constraints.
+
+This tool was used to provide optimal hosting configuration recommendations to AWS SageMaker customers on JumpStart. Same system was used to allow customers to benchmark their own deployments on JumpStart.
+
+## Technologies
+
+ECS, Docker, Java, Python, Locust, AWS SageMaker
