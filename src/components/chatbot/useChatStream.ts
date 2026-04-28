@@ -49,9 +49,16 @@ export function useChatStream({ url, token }: UseChatStreamArgs): UseChatStreamR
       };
       if (token) headers["X-Chat-Token"] = token;
 
+      const endpoint = `${url.replace(/\/+$/, "")}/chat/stream`;
+      console.info("[chatbot] sending request", {
+        endpoint,
+        messageCount: messages.length,
+        hasToken: Boolean(token),
+      });
+
       let response: Response;
       try {
-        response = await fetch(`${url.replace(/\/+$/, "")}/chat/stream`, {
+        response = await fetch(endpoint, {
           method: "POST",
           credentials: "omit",
           headers,
@@ -59,20 +66,47 @@ export function useChatStream({ url, token }: UseChatStreamArgs): UseChatStreamR
           signal: controller.signal,
         });
       } catch (e) {
-        if ((e as Error).name === "AbortError") return;
+        if ((e as Error).name === "AbortError") {
+          console.info("[chatbot] fetch aborted before response");
+          return;
+        }
+        console.error("[chatbot] fetch threw — request never reached the server or was blocked by the browser (CORS/DNS/network)", {
+          endpoint,
+          name: (e as Error).name,
+          message: (e as Error).message,
+          error: e,
+        });
         setIsStreaming(false);
         setCooldownUntil(Date.now() + COOLDOWN_MS);
         setError("The chat service is offline right now. Try again later.");
         return;
       }
 
+      console.info("[chatbot] received response", {
+        endpoint,
+        status: response.status,
+        statusText: response.statusText,
+        ok: response.ok,
+        contentType: response.headers.get("content-type"),
+      });
+
       if (response.status === 401) {
+        const body = await response.text().catch(() => "");
+        console.error("[chatbot] 401 unauthorized — wrapper rejected X-Chat-Token", { body });
         setIsStreaming(false);
         setCooldownUntil(Date.now() + COOLDOWN_MS);
         setError("Chat is not available right now.");
         return;
       }
       if (!response.ok || !response.body) {
+        const body = await response.text().catch(() => "");
+        console.error("[chatbot] non-OK response", {
+          endpoint,
+          status: response.status,
+          statusText: response.statusText,
+          hasBody: Boolean(response.body),
+          body,
+        });
         setIsStreaming(false);
         setCooldownUntil(Date.now() + COOLDOWN_MS);
         setError("The chat service is offline right now. Try again later.");
@@ -117,13 +151,21 @@ export function useChatStream({ url, token }: UseChatStreamArgs): UseChatStreamR
         }
       } catch (e) {
         if ((e as Error).name !== "AbortError") {
+          console.error("[chatbot] stream interrupted while reading SSE body", {
+            endpoint,
+            name: (e as Error).name,
+            message: (e as Error).message,
+            error: e,
+          });
           setIsStreaming(false);
           setCooldownUntil(Date.now() + COOLDOWN_MS);
           setError("The chat service was interrupted. Try again.");
           return;
         }
+        console.info("[chatbot] stream aborted by client");
       }
 
+      console.info("[chatbot] stream finished", { endpoint, finishReason });
       setIsStreaming(false);
       onDone(finishReason);
     },
