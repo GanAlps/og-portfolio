@@ -1,6 +1,7 @@
 import { MDXRemote, MDXRemoteProps } from "next-mdx-remote/rsc";
 import React, { ReactNode } from "react";
 import { slugify as transliterate } from "transliteration";
+import { Mermaid } from "@/components/Mermaid";
 
 import {
   Heading,
@@ -128,6 +129,11 @@ function createCodeBlock(props: any) {
 
     // Extract language from className (format: language-xxx)
     const language = className.replace("language-", "");
+
+    if (language === "mermaid") {
+      return <Mermaid chart={children} />;
+    }
+
     const label = language.charAt(0).toUpperCase() + language.slice(1);
 
     return (

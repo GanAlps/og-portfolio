@@ -38,6 +38,7 @@ import {
   SiTerraform,
   SiGo,
   SiTypescript,
+  SiReact,
 } from "react-icons/si";
 
 import { FaAws, FaJava } from "react-icons/fa";
@@ -83,6 +84,7 @@ export const iconLibrary: Record<string, IconType> = {
   terraform: SiTerraform,
   go: SiGo,
   typescript: SiTypescript,
+  react: SiReact,
   aws: FaAws,
   facebook: FaFacebook,
   pinterest: FaPinterest,
