@@ -68,6 +68,18 @@ Docs available at: [docs.once-ui.com](https://docs.once-ui.com/docs/magic-portfo
 - A localized, earlier version of Magic Portfolio is available with the next-intl library
 - To use localization, switch to the 'i18n' branch
 
+### Portfolio chatbot (optional)
+
+A floating chat button that connects to a local LLM (via the sibling [portfolio-chat-proxy](../portfolio-chat-proxy) project) for visitors to ask questions about the portfolio. The button is env-gated and invisible when not configured.
+
+To enable, set in `.env.local`:
+```
+NEXT_PUBLIC_CHAT_URL=https://<your-tailscale-funnel>.ts.net:8443
+NEXT_PUBLIC_CHAT_TOKEN=<optional obfuscation token>
+```
+
+Leave `NEXT_PUBLIC_CHAT_URL` empty to hide the button entirely (no extra bundle shipped).
+
 ## Creators
 
 Lorant One: [Threads](https://www.threads.net/@lorant.one) / [LinkedIn](https://www.linkedin.com/in/lorant-one/)

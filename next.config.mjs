@@ -9,6 +9,7 @@ const withMDX = mdx({
 const nextConfig = {
   pageExtensions: ["ts", "tsx", "md", "mdx"],
   transpilePackages: ["next-mdx-remote"],
+  allowedDevOrigins: ["spark-379b.tail4d7b85.ts.net"],
   images: {
     remotePatterns: [
       {
