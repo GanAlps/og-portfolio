@@ -223,7 +223,7 @@ const about: About = {
     institutions: [
       {
         name: "Indian Institute of Technology BHU — Varanasi, India",
-        description: <>Bachelor of Technology in Electronics Engineering.</>,
+        description: <>Bachelor of Technology in Electronics Engineering. Graduated 2015.</>,
       },
     ],
   },
@@ -244,9 +244,8 @@ const about: About = {
           { name: "Python", icon: "python" },
           { name: "Go", icon: "go" },
           { name: "Spring Boot", icon: "spring" },
-          { name: "Kafka", icon: "kafka" },
-          { name: "Redis", icon: "redis" },
-          { name: "PostgreSQL", icon: "postgresql" },
+          { name: "DynamoDB", icon: "aws" },
+          { name: "React", icon: "react" },
         ],
         images: [],
       },
@@ -262,7 +261,28 @@ const about: About = {
           { name: "AWS", icon: "aws" },
           { name: "Kubernetes", icon: "kubernetes" },
           { name: "Docker", icon: "docker" },
-          { name: "Terraform", icon: "terraform" },
+          { name: "ECS", icon: "aws" },
+          { name: "SageMaker", icon: "aws" },
+          { name: "Bedrock", icon: "aws" },
+        ],
+        images: [],
+      },
+      {
+        title: "AI & ML",
+        description: (
+          <>
+            Hands-on experience building production-grade inference and training systems on
+            SageMaker — from serverless fine-tuning experiences to continued pre-training on
+            HyperPod and large-scale inference benchmarking. Familiar with modern optimizations
+            like K-V Cache, Speculative Decoding, PEFT, RLVR, and RLAIF, and with the broader
+            stack of model customization, evaluation, and deployment.
+          </>
+        ),
+        tags: [
+          { name: "Inference" },
+          { name: "Fine Tuning" },
+          { name: "Synthetic Data Generation" },
+          { name: "Evaluation" },
         ],
         images: [],
       },
