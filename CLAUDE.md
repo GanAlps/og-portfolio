@@ -63,3 +63,7 @@ Routes are enabled/disabled in `once-ui.config.ts` under `routes`. The `RouteGua
 - New work project: add `.mdx` file to `src/app/work/projects/`
 - New social icon: add to `src/resources/icons.ts`, then reference in `content.tsx`
 - Enable/disable pages: toggle routes in `once-ui.config.ts`
+
+### Chatbot (optional)
+
+Visitors can ask questions about the portfolio via a floating chat button. The UI lives in `src/components/Chatbot.tsx` + `src/components/chatbot/`. It is env-gated by `NEXT_PUBLIC_CHAT_URL`; when unset, the component renders `null` and ships no behaviour. Backend is the sibling [portfolio-chat-proxy](../portfolio-chat-proxy) FastAPI project which owns the system prompt and all guardrails. Streaming uses `fetch` + `ReadableStream` (SSE over POST because we need a request body + optional `X-Chat-Token` header).

@@ -12,6 +12,9 @@ import {
   HiOutlineDocument,
   HiOutlineGlobeAsiaAustralia,
   HiOutlineRocketLaunch,
+  HiOutlineChatBubbleLeftRight,
+  HiOutlineXMark,
+  HiOutlineArrowPath,
 } from "react-icons/hi2";
 
 import {
@@ -38,6 +41,7 @@ import {
   SiTerraform,
   SiGo,
   SiTypescript,
+  SiReact,
 } from "react-icons/si";
 
 import { FaAws, FaJava } from "react-icons/fa";
@@ -47,6 +51,9 @@ import { FaDiscord, FaGithub, FaLinkedin, FaX, FaThreads, FaInstagram, FaXTwitte
 export const iconLibrary: Record<string, IconType> = {
   arrowUpRight: HiArrowUpRight,
   arrowRight: HiArrowRight,
+  chat: HiOutlineChatBubbleLeftRight,
+  close: HiOutlineXMark,
+  refresh: HiOutlineArrowPath,
   email: HiEnvelope,
   globe: HiOutlineGlobeAsiaAustralia,
   person: PiUserCircleDuotone,
@@ -83,6 +90,7 @@ export const iconLibrary: Record<string, IconType> = {
   terraform: SiTerraform,
   go: SiGo,
   typescript: SiTypescript,
+  react: SiReact,
   aws: FaAws,
   facebook: FaFacebook,
   pinterest: FaPinterest,

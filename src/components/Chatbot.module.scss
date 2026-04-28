@@ -1,0 +1,117 @@
+@use "./breakpoints.scss" as breakpoints;
+
+.fab {
+  position: fixed;
+  right: var(--static-space-24);
+  bottom: calc(var(--static-space-24) + env(safe-area-inset-bottom, 0px));
+  z-index: 10;
+  border-radius: 9999px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
+}
+
+.panel {
+  position: fixed;
+  right: var(--static-space-24);
+  bottom: calc(var(--static-space-24) + env(safe-area-inset-bottom, 0px));
+  width: 380px;
+  max-width: calc(100vw - var(--static-space-48));
+  height: 560px;
+  max-height: calc(100vh - var(--static-space-48));
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  background: var(--page-background);
+  border: 1px solid var(--neutral-alpha-weak);
+  border-radius: var(--radius-l);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  overflow: hidden;
+}
+
+.header {
+  border-bottom: 1px solid var(--neutral-alpha-weak);
+}
+
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--static-space-16);
+  display: flex;
+  flex-direction: column;
+  gap: var(--static-space-12);
+}
+
+.message {
+  padding: var(--static-space-8) var(--static-space-12);
+  border-radius: var(--radius-m);
+  max-width: 85%;
+  word-wrap: break-word;
+  white-space: pre-wrap;
+  line-height: 1.45;
+}
+
+.userMessage {
+  align-self: flex-end;
+  background: var(--brand-alpha-weak);
+  color: var(--neutral-on-background-strong);
+}
+
+.assistantMessage {
+  align-self: flex-start;
+  background: var(--neutral-alpha-weak);
+  color: var(--neutral-on-background-strong);
+}
+
+.emptyState {
+  color: var(--neutral-on-background-weak);
+  text-align: center;
+  padding: var(--static-space-24);
+}
+
+.banner {
+  padding: var(--static-space-8) var(--static-space-12);
+  background: var(--warning-alpha-weak, var(--neutral-alpha-weak));
+  border-top: 1px solid var(--neutral-alpha-weak);
+  color: var(--neutral-on-background-strong);
+  font-size: 14px;
+}
+
+.composer {
+  border-top: 1px solid var(--neutral-alpha-weak);
+  padding: var(--static-space-8);
+  display: flex;
+  gap: var(--static-space-8);
+  align-items: flex-end;
+}
+
+.textarea {
+  flex: 1;
+  min-height: 40px;
+  max-height: 120px;
+  padding: var(--static-space-8);
+  border: 1px solid var(--neutral-alpha-weak);
+  border-radius: var(--radius-m);
+  background: var(--page-background);
+  color: var(--neutral-on-background-strong);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1.4;
+  resize: none;
+  outline: none;
+}
+
+.textarea:focus {
+  border-color: var(--brand-on-background-strong);
+}
+
+@media (max-width: breakpoints.$s) {
+  .panel {
+    right: 0;
+    bottom: 0;
+    width: 100vw;
+    height: 100vh;
+    max-width: 100vw;
+    max-height: 100vh;
+    border-radius: 0;
+    border: none;
+  }
+}
