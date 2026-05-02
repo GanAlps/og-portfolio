@@ -24,3 +24,6 @@ export {
   effects,
   dataStyle,
 } from "./once-ui.config";
+
+export { llmInternalsCourse, seriesBySlug, getSeries } from "./series";
+export type { Series, SeriesPart } from "./series";

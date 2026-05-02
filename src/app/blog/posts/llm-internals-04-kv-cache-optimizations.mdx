@@ -1,0 +1,249 @@
+---
+title: "KV Cache Optimizations: PagedAttention, MQA / GQA, FlashAttention & Batching"
+subtitle: "The set of tricks that turned LLM serving from a research demo into a real business"
+publishedAt: "2026-05-29"
+summary: "Part 4 of The LLM Internals Course. The KV cache is the single biggest constraint on LLM serving — it grows linearly with tokens and quadratically with batch size, and it's why a GPU runs out of memory before it runs out of compute. We unpack the architectural fixes (MQA, GQA), the engineering fixes (PagedAttention, FlashAttention, continuous batching, chunked prefill, prefix caching), and a brief tour of quantization — then see how vLLM stacks them together."
+tag: "AI"
+series: "llm-internals-course"
+part: 4
+partTitle: "KV Cache Optimizations"
+images: []
+team: []
+---
+
+## Why this post exists
+
+In Post 2 we saw why the KV cache is necessary — without it, every new token would re-run a full forward pass over the entire sequence, turning O(N) decode work into O(N²). With it, each new token reuses cached K and V vectors and only does fresh work for itself.
+
+The catch is that the cache is not free. It is, in fact, the dominant runtime cost of LLM serving. The size of the cache scales with everything you'd want to scale up: more layers, more heads, longer context, more concurrent requests.
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-04-kv-cache-optimizations/eq-kv-size.svg" alt="KV cache size formula: 2 times layers times kv heads times head dim times sequence length times batch times bytes per element" style={{ maxWidth: "640px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Two for K and V; multiply by layers, KV-heads, head-dim, sequence length L, concurrent batch size B, and bytes per element. For Llama-3 70B at 4K context and batch 32, this lands around 80 GB — just for the cache.
+</Text>
+
+That's bigger than most single GPUs. So *every* practical inference optimisation in production targets some part of this expression. There are two broad approaches:
+
+- **Architectural** changes — make the model itself store less per token (MQA, GQA).
+- **Engineering** changes — change *how* the cache is stored, accessed, batched, or shared (PagedAttention, FlashAttention, continuous batching, chunked prefill, prefix caching).
+
+A third orthogonal lever is **quantization** — store every number in fewer bits. We'll touch on it after FlashAttention, since it shows up at every level of the stack, not just KV cache.
+
+This is the densest post in the inference half of the course. Read it slow.
+
+## Multi-Query Attention (MQA)
+
+Recall from Post 2 that each attention head has its own learned `W_Q`, `W_K`, `W_V` matrices. So with `h = 96` heads, the KV cache stores 96 separate K-vectors and 96 separate V-vectors per token, per layer.
+
+Multi-Query Attention asks: do we really need 96 sets of K and V? The query is what carries the "what am I asking" signal — we keep one Q per head. But for K and V, MQA collapses all 96 heads down to *one shared* K-vector and *one shared* V-vector per token, per layer.
+
+That's a 96× reduction in KV cache memory and the corresponding reduction in memory bandwidth for decode. The downside: the model is forced to make all 96 heads attend to the same labels and pull the same content — a real loss in expressiveness. Models trained with pure MQA (PaLM was an early adopter) measurably underperform on quality benchmarks compared to standard multi-head.
+
+## Grouped-Query Attention (GQA)
+
+GQA is the compromise that won. Instead of one shared K/V (MQA) or 96 unshared (full multi-head), you create *groups*. Llama 3 70B has 64 query heads and 8 KV heads — so each group of 8 query heads shares one K and one V. That's an 8× memory win with much less quality regression.
+
+<Media src="/images/blog/llm-internals-04-kv-cache-optimizations/gqa-architecture.png" alt="MHA, MQA, and GQA architectures side by side: MHA has h K/V pairs, MQA has 1, GQA has h/g groups" />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2305.13245">Ainslie et al. 2023, "GQA: Training Generalized Multi-Query Transformer Models"</SmartLink>, Figure 2. MHA on the left, GQA in the middle, MQA on the right.
+</Text>
+
+GQA is also retroactively applicable: you can take a multi-head pre-trained model, average groups of K/V heads together, and continue pre-training a tiny bit to recover quality. That's how Llama 2 → Llama 3 made the switch without re-training from scratch.
+
+Today every frontier open model uses GQA — Llama 3, DeepSeek-V3, Qwen 3. Pure MHA is mostly gone in production decoder-only LLMs.
+
+## PagedAttention
+
+Architectural fixes shrink the cache. Engineering fixes change how we *store* it.
+
+The naive approach to KV cache is one contiguous tensor per request, sized for the request's max possible length. If you allocate room for 4K tokens but the user only sends 200 tokens of prompt and gets 50 tokens back, you've wasted 95% of that allocation. Multiply across hundreds of concurrent requests with wildly different lengths and you have catastrophic memory fragmentation. The GPU's full of holes.
+
+PagedAttention (introduced by vLLM in 2023) borrows the idea of **virtual memory paging** from operating systems. The KV cache is split into fixed-size blocks (typically 16 tokens each). Each request maintains a small *block table* mapping its logical positions to the physical KV blocks scattered across GPU memory. When a request grows, you allocate a new block from the free pool and update the table. When a request finishes, all its blocks return to the pool.
+
+<Media src="/images/blog/llm-internals-04-kv-cache-optimizations/local-paged-attention-continuous-batching.png" alt="PagedAttention block table: requests have logical token positions mapped to physical KV blocks scattered in memory" />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2309.06180">Kwon et al. 2023, vLLM PagedAttention paper</SmartLink>. Each request's contiguous logical KV is reassembled from a per-request block table.
+</Text>
+
+The wins are dramatic. PagedAttention lets you fit 2–4× more concurrent requests into the same KV memory, which directly translates to throughput. It also makes prefix caching (§9) implementable: shared prefixes can have their blocks pointed to by multiple requests' block tables.
+
+Almost every production inference server now ships some equivalent. PagedAttention is to LLM serving what virtual memory was to operating systems.
+
+## FlashAttention
+
+PagedAttention is about fitting the cache. FlashAttention is about computing on it efficiently.
+
+A GPU has two kinds of memory. **HBM** (the "main" GPU memory you see in `nvidia-smi`) is large but slow to access — single-digit TB/s on H100, and any time the model fetches from HBM, the kernel sits idle waiting. **SRAM** (on-chip cache, also called L1/shared memory) is tiny — kilobytes per streaming multiprocessor — but it's roughly 10× faster.
+
+The naive attention kernel does:
+
+1. Compute Q · Kᵀ → write the (N × N) score matrix to HBM.
+2. Apply softmax → read the (N × N) matrix back from HBM, do row-wise softmax, write back.
+3. Multiply by V → read again, multiply, write.
+
+Three round trips to HBM, all on a matrix that's quadratic in sequence length. For a 4K context, that's 16M numbers per layer per head, hammering HBM bandwidth.
+
+<Media src="/images/blog/llm-internals-04-kv-cache-optimizations/flashattn-sram-hbm.jpg" alt="GPU memory hierarchy: tiny fast SRAM next to compute units, large slow HBM further away" />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://github.com/Dao-AILab/flash-attention">Tri Dao et al., FlashAttention repository</SmartLink>. SRAM is the hot lane next to the math units; HBM is the cold lane several orders of magnitude away in latency.
+</Text>
+
+FlashAttention (Dao et al., 2022) restructures the kernel around a **tiling** strategy: split Q and K into small tiles that fit in SRAM, compute one tile of the score matrix at a time *entirely in SRAM*, and combine results using a clever streaming softmax that doesn't need the full matrix in memory. The full attention matrix is *never materialised* in HBM. The result: 2–4× speedup on prefill, often more, with no change in numerics.
+
+> **FlashAttention v2 and v3** improved the parallelism strategy and added Hopper-specific (FP8 + asynchronous) optimisations for the H100/H200 generation. The kernel-level intuition is unchanged. If you want the details, start with <SmartLink href="https://arxiv.org/abs/2307.08691">Dao 2023 (v2)</SmartLink> and <SmartLink href="https://tridao.me/blog/2024/flash3/">Shah et al. 2024 (v3)</SmartLink>.
+
+FlashAttention shines brightest in **prefill** (where N is large) and during **training** (where you also need backward pass attention computations). In Post 7 we'll see it again in the training context, where it's load-bearing for fitting long-context models on a fixed memory budget.
+
+## Quantization (a brief tour)
+
+Architectural and engineering fixes change *what* you store and *how*. Quantization changes the *bytes per element* in our equation up top — and it's an orthogonal multiplier on every other optimisation.
+
+Standard training is FP32 (32-bit float per parameter). Modern inference rarely runs at full precision. The common choices, in order of aggressiveness:
+
+- **BF16 / FP16** (16-bit float). Half the memory of FP32, almost no quality regression for inference. The default for almost every model loaded today.
+- **FP8** (Hopper-class GPUs). Half again. Used in production at OpenAI, Anthropic, and most major shops on H100/H200 hardware.
+- **INT8** (8-bit integer). Quantize each weight to one of 256 values, with a per-tensor or per-channel scale. Established and well-tooled (bitsandbytes, GPTQ, AWQ).
+- **INT4 / NF4** (4-bit). Squeeze each weight into 4 bits. Standard INT4 spreads values uniformly; **NF4** ("Normal Float 4") spreads its 16 buckets to match the *normal distribution* that pre-trained weights actually follow — preserving the high-density region around zero where most weights live, accepting more error in the long tails. NF4 is what QLoRA uses (Post 10).
+
+<Media src="/images/blog/llm-internals-04-kv-cache-optimizations/hf-fp8-scheme.png" alt="FP8 representation showing exponent, mantissa, and sign bits for E5M2 and E4M3 variants" />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://huggingface.co/blog/4bit-transformers-bitsandbytes">Hugging Face blog, "Making LLMs lighter with bitsandbytes"</SmartLink>. FP8 has two common variants — E5M2 (more range) and E4M3 (more precision). The choice matters for which layers you quantize.
+</Text>
+
+Two important wrinkles:
+
+- **Weights vs. activations vs. KV cache.** Weight quantization is everywhere. Activation quantization is harder because activations have a wider dynamic range — the standard fix is to quantize weights aggressively and keep activations in higher precision (W8A16, W4A16). KV-cache quantization (FP8 or INT8 for K and V tensors) is increasingly common in production and stacks cleanly with PagedAttention.
+- **Calibration vs. post-training vs. quantization-aware training.** GPTQ / AWQ use a small calibration dataset to choose per-channel scales after training; this is the fast path. Quantization-aware training (QAT) actually trains the model to be robust to lower precision, which is more expensive but recovers more quality.
+
+For inference specifically: most production deployments run at **W8A16 or W4A16 with FP8 KV cache** in 2026, and Hopper-or-newer hardware has dedicated tensor cores for these formats. Quantization is rarely the *first* knob you reach for, but it's usually the cheapest 2× memory win available.
+
+(We'll see another flavour of quantization in Post 7 — *mixed-precision training*, where weights live in FP32 master copies but forward/backward runs in BF16. Same family of techniques, different goals.)
+
+## Continuous batching
+
+We're back to the inference-server level. Standard "static" batching collects requests, runs them all together until *all* have finished generating, then collects the next batch. This is wildly inefficient: a request generating 50 tokens has to wait for the slowest one in the batch, which might be generating 800.
+
+<Media src="/images/blog/llm-internals-04-kv-cache-optimizations/anyscale-static-batching.png" alt="Static batching: short requests sit idle waiting for the longest request in the batch to finish" />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://www.anyscale.com/blog/continuous-batching-llm-inference">Anyscale blog, "How Continuous Batching Enables 23× Throughput in LLM Inference"</SmartLink>. The grey cells are wasted GPU time.
+</Text>
+
+**Continuous batching** (also called *in-flight batching*) restructures the loop. The scheduler treats every iteration of the model as an independent step. After each forward pass, finished requests are evicted and new requests are admitted into the batch immediately. The batch is not a fixed group — it's a moving window.
+
+<Media src="/images/blog/llm-internals-04-kv-cache-optimizations/anyscale-continuous-batching.png" alt="Continuous batching: finished requests are replaced by new requests at every iteration, keeping the GPU full" />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://www.anyscale.com/blog/continuous-batching-llm-inference">Anyscale blog</SmartLink>. The GPU is full at every step; idle slots become new requests on the next iteration.
+</Text>
+
+Anyscale's measurements showed up to 23× throughput improvement over static batching in realistic workloads. Continuous batching is the second-biggest single win in production LLM serving (PagedAttention being first). Together they're the reason vLLM became the default.
+
+## Chunked prefill
+
+Continuous batching has one rough edge. A long prefill — say a 16K-token prompt — produces *one* sampled token but takes a lot of compute to do it. While that prefill runs, decodes for other requests sit idle. The user sending the long prompt blocks everyone else's tokens.
+
+**Chunked prefill** caps the prefill work per scheduler step. If `long_prefill_token_threshold = 1024`, a 16K prompt is split into 16 chunks; each iteration processes one chunk plus whatever decodes are running. The long prefill takes more iterations to complete but doesn't monopolise any of them. Decodes for other in-flight requests still progress every step.
+
+The trade-off is real but small: chunked prefill increases time-to-first-token slightly for the long prompt (you pay the iteration overhead more times) but dramatically improves time-per-output-token for *every other request in the batch*. In any multi-tenant service this is a clear win.
+
+## Prefix caching
+
+The last optimisation in this set is the one with the biggest potential for boring real-world wins.
+
+In production, lots of requests share long prefixes. System prompts (`"You are a helpful assistant…"`), few-shot examples, document context retrieved by RAG. If two requests share the first 2,000 tokens, the K/V for those tokens is *literally identical* between them — same model weights, same positions, same content.
+
+Prefix caching exploits this. When the server processes a prompt, it hashes blocks of tokens (e.g., every 16-token block) and stores the (hash → KV block) mapping. When a new request arrives, the scheduler walks its prefix, looks up each block hash, and reuses cached KV blocks for any prefix tokens that match. Prefill compute drops to zero for the cached prefix.
+
+This works beautifully with PagedAttention because KV blocks were already stored as discrete units pointed to by per-request tables — making them shareable across requests is a small extension. When a cached block is no longer referenced by any active request, it becomes a candidate for eviction, but the metadata (hash → block) sticks around so a future request can resurrect it.
+
+For a typical assistant with a 1,500-token system prompt and 50K active requests per hour, prefix caching can drop prefill compute by 60–80%. That's a free order of magnitude.
+
+## Putting it together
+
+Every running request in vLLM is benefiting from all of these simultaneously:
+
+- Its KV cache is **GQA-shaped** (8× smaller than vanilla MHA).
+- Its KV blocks live wherever **PagedAttention** could find space.
+- Its attention compute uses **FlashAttention** kernels that never materialise the full score matrix.
+- Its weights and KV are in **lower-precision** (W8A16 or W4A16, FP8 KV).
+- It shares **continuous batches** with other in-flight requests.
+- If its prefix matches another request's, **prefix caching** reuses those KV blocks and skips prefill for them.
+- If it's a long prompt, **chunked prefill** keeps it from blocking decodes.
+
+The composition matters. Prefix caching only works because PagedAttention made KV blocks discrete. Continuous batching only pays off because PagedAttention removed memory fragmentation. FlashAttention's wins compound with quantization because they both attack the memory bandwidth bottleneck.
+
+This is what "modern LLM inference" actually means. Not one trick — a stack of seven that all reinforce each other.
+
+## Coming up next
+
+We've squeezed as much as we can out of one GPU. Post 5 is about scaling out: tensor / pipeline / sequence parallelism, speculative decoding (where a small model proposes and the big model verifies), prefill/decode disaggregation (run them on entirely different boxes), and Mixture-of-Experts (where only a fraction of parameters fire per token).
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">From my study notes</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Yashvardhan Ghuse, "Core Optimisations in LLMs: Paged Attention, Mixture of Experts, and Flash Attention." <SmartLink href="https://medium.com/@ygsh0816/core-optimisations-in-llms-paged-attention-mixture-of-experts-and-flash-attention-310295fb91e5">medium.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      "Flash Attention deep dive (visual)" — YouTube. <SmartLink href="https://www.youtube.com/watch?v=LKwyHWYEIMQ">youtube.com</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Architectural optimisations</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Shazeer 2019, "Fast Transformer Decoding: One Write-Head is All You Need" (MQA). <SmartLink href="https://arxiv.org/abs/1911.02150">arxiv.org/abs/1911.02150</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Ainslie et al. 2023, "GQA: Training Generalized Multi-Query Transformer." <SmartLink href="https://arxiv.org/abs/2305.13245">arxiv.org/abs/2305.13245</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Engineering optimisations</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Kwon et al. 2023, "Efficient Memory Management for LLM Serving with PagedAttention" (vLLM). <SmartLink href="https://arxiv.org/abs/2309.06180">arxiv.org/abs/2309.06180</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Tri Dao et al. 2022, "FlashAttention." <SmartLink href="https://arxiv.org/abs/2205.14135">arxiv.org/abs/2205.14135</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Tri Dao 2023, "FlashAttention-2." <SmartLink href="https://arxiv.org/abs/2307.08691">arxiv.org/abs/2307.08691</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Shah et al. 2024, "FlashAttention-3 (Hopper)." <SmartLink href="https://tridao.me/blog/2024/flash3/">tridao.me</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Agrawal et al. 2023, "Sarathi: chunked prefill." <SmartLink href="https://arxiv.org/abs/2308.16369">arxiv.org/abs/2308.16369</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Anyscale, "Continuous Batching: 23× throughput." <SmartLink href="https://www.anyscale.com/blog/continuous-batching-llm-inference">anyscale.com</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Quantization</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face, "Making LLMs lighter with bitsandbytes." <SmartLink href="https://huggingface.co/blog/4bit-transformers-bitsandbytes">huggingface.co</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Frantar et al. 2022, "GPTQ." <SmartLink href="https://arxiv.org/abs/2210.17323">arxiv.org/abs/2210.17323</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lin et al. 2023, "AWQ." <SmartLink href="https://arxiv.org/abs/2306.00978">arxiv.org/abs/2306.00978</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Dettmers et al. 2023, "QLoRA" (NF4 normal-float quantization). <SmartLink href="https://arxiv.org/abs/2305.14314">arxiv.org/abs/2305.14314</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Reference implementation</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      vLLM repository. <SmartLink href="https://github.com/vllm-project/vllm">github.com/vllm-project/vllm</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>

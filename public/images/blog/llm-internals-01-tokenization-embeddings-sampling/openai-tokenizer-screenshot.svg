@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 240" role="img" aria-label="Screenshot pending">
+  <rect width="800" height="240" fill="#f4f4f5" stroke="#d4d4d8" stroke-width="1"/>
+  <text x="400" y="100" font-family="system-ui, sans-serif" font-size="22" fill="#71717a" text-anchor="middle" font-weight="600">Screenshot placeholder</text>
+  <text x="400" y="135" font-family="system-ui, sans-serif" font-size="14" fill="#71717a" text-anchor="middle">Capture from https://platform.openai.com/tokenizer</text>
+  <text x="400" y="158" font-family="system-ui, sans-serif" font-size="14" fill="#71717a" text-anchor="middle">Save here as openai-tokenizer-screenshot.png and update the Media src.</text>
+</svg>

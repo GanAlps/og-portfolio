@@ -1,7 +1,8 @@
 import { Column, Heading, Meta, Schema } from "@once-ui-system/core";
 import { Mailchimp } from "@/components";
 import { Posts } from "@/components/blog/Posts";
-import { baseURL, blog, person, newsletter } from "@/resources";
+import { SeriesCard } from "@/components/blog/SeriesCard";
+import { baseURL, blog, llmInternalsCourse, person } from "@/resources";
 import { getPosts } from "@/utils/utils";
 
 export async function generateMetadata() {
@@ -15,7 +16,10 @@ export async function generateMetadata() {
 }
 
 export default function Blog() {
-  const hasEarlierPosts = getPosts(["src", "app", "blog", "posts"]).length > 3;
+  const standalonePosts = getPosts(["src", "app", "blog", "posts"]).filter(
+    (post) => !post.metadata.series,
+  );
+  const hasEarlierPosts = standalonePosts.length > 3;
 
   return (
     <Column maxWidth="m" paddingTop="24">
@@ -36,6 +40,9 @@ export default function Blog() {
         {blog.title}
       </Heading>
       <Column fillWidth flex={1} gap="40">
+        <Column paddingX="24">
+          <SeriesCard series={llmInternalsCourse} />
+        </Column>
         <Posts range={[1, 1]} thumbnail />
         <Posts range={[2, 3]} columns="2" thumbnail direction="column" />
         <Mailchimp marginBottom="l" />
