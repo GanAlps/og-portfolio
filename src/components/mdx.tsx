@@ -1,7 +1,10 @@
 import { MDXRemote, MDXRemoteProps } from "next-mdx-remote/rsc";
 import React, { ReactNode } from "react";
 import { slugify as transliterate } from "transliteration";
+import remarkGfm from "remark-gfm";
 import { Mermaid } from "@/components/Mermaid";
+import { TokenizerDemo } from "@/components/blog/TokenizerDemo";
+import { FurtherReading } from "@/components/blog/FurtherReading";
 
 import {
   Heading,
@@ -176,6 +179,78 @@ function createHR() {
   );
 }
 
+function createTable({ children }: { children?: ReactNode }) {
+  return (
+    <Row fillWidth marginTop="12" marginBottom="20" overflow="auto">
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: "0.95rem",
+          lineHeight: 1.55,
+        }}
+      >
+        {children}
+      </table>
+    </Row>
+  );
+}
+
+function createTableHead({ children }: { children?: ReactNode }) {
+  return (
+    <thead
+      style={{
+        textAlign: "left",
+        borderBottom: "1px solid var(--neutral-alpha-medium)",
+        background: "var(--neutral-alpha-weak)",
+      }}
+    >
+      {children}
+    </thead>
+  );
+}
+
+function createTableRow({ children }: { children?: ReactNode }) {
+  return (
+    <tr
+      style={{
+        borderBottom: "1px solid var(--neutral-alpha-weak)",
+      }}
+    >
+      {children}
+    </tr>
+  );
+}
+
+function createTableHeaderCell({ children }: { children?: ReactNode }) {
+  return (
+    <th
+      style={{
+        padding: "10px 12px",
+        fontWeight: 600,
+        verticalAlign: "top",
+        color: "var(--neutral-on-background-strong)",
+      }}
+    >
+      {children}
+    </th>
+  );
+}
+
+function createTableCell({ children }: { children?: ReactNode }) {
+  return (
+    <td
+      style={{
+        padding: "10px 12px",
+        verticalAlign: "top",
+        color: "var(--neutral-on-background-medium)",
+      }}
+    >
+      {children}
+    </td>
+  );
+}
+
 const components = {
   p: createParagraph as any,
   h1: createHeading("h1") as any,
@@ -192,6 +267,11 @@ const components = {
   ul: createList("ul") as any,
   li: createListItem as any,
   hr: createHR as any,
+  table: createTable as any,
+  thead: createTableHead as any,
+  tr: createTableRow as any,
+  th: createTableHeaderCell as any,
+  td: createTableCell as any,
   Heading,
   Text,
   CodeBlock,
@@ -208,6 +288,8 @@ const components = {
   Icon,
   Media,
   SmartLink,
+  TokenizerDemo,
+  FurtherReading,
 };
 
 type CustomMDXProps = MDXRemoteProps & {
@@ -215,5 +297,16 @@ type CustomMDXProps = MDXRemoteProps & {
 };
 
 export function CustomMDX(props: CustomMDXProps) {
-  return <MDXRemote options={{ blockJS: false }} {...props} components={{ ...components, ...(props.components || {}) }} />;
+  return (
+    <MDXRemote
+      options={{
+        blockJS: false,
+        mdxOptions: {
+          remarkPlugins: [remarkGfm],
+        },
+      }}
+      {...props}
+      components={{ ...components, ...(props.components || {}) }}
+    />
+  );
 }

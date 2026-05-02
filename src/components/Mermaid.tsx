@@ -2,11 +2,35 @@
 
 import { useEffect, useId, useState } from "react";
 
+const DEFAULT_MAX_WIDTH = "520px";
+
 interface MermaidProps {
   chart: string;
+  /**
+   * Caps the rendered diagram's width. Mermaid emits SVGs at their natural
+   * intrinsic size, which can exceed the blog text column for complex flows.
+   * Defaults to a value that fits comfortably within a 700px column with
+   * room to breathe; pass an explicit string (e.g. "640px", "80%") to
+   * widen for wider charts or narrow for very small ones.
+   */
+  maxWidth?: string;
 }
 
-export function Mermaid({ chart }: MermaidProps) {
+function makeSvgResponsive(svg: string): string {
+  // mermaid emits <svg width="NNN" height="MMM" ...> with absolute pixel
+  // sizes. Strip those, keep the viewBox (mermaid adds it), and force the
+  // SVG to scale to its container.
+  let out = svg.replace(/<svg([^>]*?)\swidth="[^"]*"/, "<svg$1");
+  out = out.replace(/<svg([^>]*?)\sheight="[^"]*"/, "<svg$1");
+  out = out.replace(/<svg([^>]*?)\sstyle="[^"]*"/, "<svg$1");
+  out = out.replace(
+    /<svg([^>]*?)>/,
+    '<svg$1 style="max-width: 100%; width: 100%; height: auto;">',
+  );
+  return out;
+}
+
+export function Mermaid({ chart, maxWidth = DEFAULT_MAX_WIDTH }: MermaidProps) {
   const id = useId().replace(/:/g, "");
   const [svg, setSvg] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
@@ -51,10 +75,13 @@ export function Mermaid({ chart }: MermaidProps) {
       style={{
         display: "flex",
         justifyContent: "center",
-        overflowX: "auto",
         margin: "16px 0",
       }}
-      dangerouslySetInnerHTML={{ __html: svg }}
-    />
+    >
+      <div
+        style={{ maxWidth, width: "100%" }}
+        dangerouslySetInnerHTML={{ __html: makeSvgResponsive(svg) }}
+      />
+    </div>
   );
 }
