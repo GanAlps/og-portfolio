@@ -9,7 +9,7 @@ type Team = {
   linkedIn: string;
 };
 
-type Metadata = {
+export type Metadata = {
   title: string;
   subtitle?: string;
   publishedAt: string;
@@ -20,6 +20,9 @@ type Metadata = {
   team: Team[];
   link?: string;
   category?: "amazon" | "personal";
+  series?: string;
+  part?: number;
+  partTitle?: string;
 };
 
 import { notFound } from "next/navigation";
@@ -51,6 +54,9 @@ function readMDXFile(filePath: string) {
     team: data.team || [],
     link: data.link || "",
     category: data.category,
+    series: data.series,
+    part: typeof data.part === "number" ? data.part : undefined,
+    partTitle: data.partTitle,
   };
 
   return { metadata, content };
@@ -73,4 +79,16 @@ function getMDXData(dir: string) {
 export function getPosts(customPath = ["", "", "", ""]) {
   const postsDir = path.join(process.cwd(), ...customPath);
   return getMDXData(postsDir);
+}
+
+const BLOG_POSTS_PATH = ["src", "app", "blog", "posts"];
+
+export function getSeriesPosts(seriesSlug: string) {
+  return getPosts(BLOG_POSTS_PATH)
+    .filter((post) => post.metadata.series === seriesSlug && typeof post.metadata.part === "number")
+    .sort((a, b) => (a.metadata.part as number) - (b.metadata.part as number));
+}
+
+export function isSeriesPost(post: { metadata: Metadata }) {
+  return Boolean(post.metadata.series && typeof post.metadata.part === "number");
 }

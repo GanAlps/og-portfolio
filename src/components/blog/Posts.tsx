@@ -8,6 +8,12 @@ interface PostsProps {
   thumbnail?: boolean;
   direction?: "row" | "column";
   exclude?: string[];
+  /**
+   * If true (default), posts that belong to a learning series are filtered out
+   * of the result. Series posts are surfaced via the dedicated series landing
+   * page, not the chronological blog feed.
+   */
+  excludeSeries?: boolean;
 }
 
 export function Posts({
@@ -16,8 +22,13 @@ export function Posts({
   thumbnail = false,
   exclude = [],
   direction,
+  excludeSeries = true,
 }: PostsProps) {
   let allBlogs = getPosts(["src", "app", "blog", "posts"]);
+
+  if (excludeSeries) {
+    allBlogs = allBlogs.filter((post) => !post.metadata.series);
+  }
 
   // Exclude by slug (exact match)
   if (exclude.length) {
