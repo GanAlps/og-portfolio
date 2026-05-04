@@ -1,0 +1,253 @@
+---
+title: "Distributed Training: DP, TP, PP, ZeRO and FSDP"
+subtitle: "Why training a frontier model takes thousands of GPUs — and how they cooperate"
+publishedAt: "2026-06-26"
+summary: "Part 8 of The LLM Internals Course. Inference parallelism (Post 5) was about throughput; training parallelism is about whether the model fits at all. We re-examine DP, PP and TP through a training lens (gradient sync, pipeline bubbles, NVLink), then go deeper: ZeRO's three sharding stages, FSDP, ZeRO-Offload, and the 3D-parallelism pattern that powers real frontier-model training."
+tag: "AI"
+series: "llm-internals-course"
+part: 8
+partTitle: "Distributed Training"
+images: []
+team: []
+---
+
+## Why training is harder than inference
+
+Post 5 walked through parallelism for inference: data parallel (DP), pipeline parallel (PP), tensor parallel (TP), and the 3D combination. The names are the same here, but training adds three twists that inference doesn't have:
+
+- **Gradient sync.** Every parameter needs a single agreed-upon gradient at the end of each step, even when the step was computed on different micro-batches across different GPUs. Inference has no gradients; training has them at every weight, every step.
+- **Optimizer state.** AdamW (Post 7) carries `m` and `v` plus an FP32 master copy — three full-size tensors per parameter. Inference doesn't carry any of this.
+- **Activation memory.** To backprop, every layer's activations have to be kept around (or recomputed). Inference throws activations away as it goes.
+
+The result: a model that *runs* fine on one H100 might not *train* on one H100. A 13B-parameter model can do inference at full speed on a single 80 GB GPU, but a vanilla DDP training run for the same model needs ~210 GB just for weights + grads + optimizer state — before activations.
+
+So the toolkit has to do more than spread work across GPUs. It has to **shard memory** as well. That's what most of this post is about.
+
+## Data Parallel (DDP)
+
+The simplest and oldest pattern. Replicate the **entire model** on every GPU. Split the **micro-batches**: GPU 0 trains on micro-batch 1, GPU 1 on micro-batch 2, and so on. Each GPU runs a normal forward+backward in isolation, then everyone synchronises gradients before the optimizer step.
+
+The sync is one **all-reduce** per parameter: each GPU contributes its local gradient, and the result (the average across all GPUs) lands back on every GPU. After all-reduce, every GPU has the same gradients and runs the same AdamW update — keeping all replicas in lockstep.
+
+The big optimisation is **gradient/computation overlap**. As soon as the backward pass produces the gradient for the last layer, the all-reduce for that layer can start, while the backward pass is still computing gradients for earlier layers. By the time the backward pass finishes, most of the syncing is already done.
+
+What DDP buys: linear throughput scaling — N GPUs train roughly N× faster (small communication overhead aside).
+What it doesn't buy: any memory savings. Every GPU stores the full model + grads + optimizer state. So DDP alone tops out the moment your model exceeds one GPU's memory.
+
+```
+   ┌─ How does all-reduce actually work? ──────────────────────────────┐
+   │ NCCL (NVIDIA's collective comm library) implements all-reduce    │
+   │ as a ring: each GPU sends a chunk of its tensor to its right     │
+   │ neighbour while receiving a different chunk from its left, and   │
+   │ accumulates as it goes. After 2(N−1) steps every GPU has the     │
+   │ summed result for its own chunk. Ring-allreduce is bandwidth-    │
+   │ optimal: total data sent per GPU is independent of N. NCCL also  │
+   │ supports tree-allreduce for very large clusters where ring-      │
+   │ latency starts to dominate. Either way, this primitive is the    │
+   │ single most-used cross-GPU operation in training.                 │
+   └────────────────────────────────────────────────────────────────────┘
+```
+
+## Pipeline Parallel (PP)
+
+When the model is too big for one GPU, the most natural split is **by layer**. Layers 1–10 live on GPU 0, layers 11–20 on GPU 1, layers 21–30 on GPU 2, etc. Each request flows through the GPUs in sequence — GPU 0's output activations become GPU 1's input.
+
+The trouble is timing. With one batch, GPU 1 has to wait for GPU 0 to finish, GPU 2 has to wait for GPU 1, and so on. Most of the cluster sits idle most of the time. The fix is to break the batch into **micro-batches** and pipeline them.
+
+The naïve schedule (GPipe-style) does all forwards first, then all backwards. Devices still spend a lot of time idle — visible as the gray cells (the **pipeline bubble**) in this schedule:
+
+<Media src="/images/blog/llm-internals-08-distributed-training/megatron-gpipe-schedule.png" alt="GPipe pipeline schedule. Four devices on the y-axis, time on the x-axis. Blue cells are forward passes for 16 micro-batches numbered 1 through 16; green cells are backward passes; gray cells are idle. Each device runs all forward passes in order then all backward passes; the gray bubble dominates the centre and end of the schedule." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2104.04473">Narayanan et al. 2021, "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM"</SmartLink>, Figure 3 (GPipe schedule). Forward passes (blue) for all 16 micro-batches finish before any backward pass (green) begins, leaving each device idle (gray) for big chunks of the step.
+</Text>
+
+The standard fix is **1F1B** ("one-forward-one-backward"): each device alternates forward and backward as soon as the dependencies are ready. Bubbles still exist but are much smaller, and activation memory is bounded (we never have all forwards in flight simultaneously):
+
+<Media src="/images/blog/llm-internals-08-distributed-training/megatron-1f1b-schedule.png" alt="1F1B interleaved pipeline schedule. Same four devices on y-axis, time on x-axis, but now blue forward and green backward cells alternate tightly. Gray idle cells appear only at start-up, end, and the optimizer-step flush; the centre of the schedule is densely packed with useful work." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2104.04473">Narayanan et al. 2021</SmartLink>, Figure 4 (interleaved 1F1B). Each device interleaves forward and backward passes as soon as their dependencies are ready, shrinking the bubble dramatically.
+</Text>
+
+PP is the right call when your interconnect *between nodes* is slow (Ethernet rather than NVLink) — PP only sends activations once per layer-block boundary, so its communication is light. The cost: activation memory pressure stays high (you have to keep micro-batch activations around until their backward fires), so PP almost always runs alongside **gradient checkpointing** (Post 7).
+
+## Tensor Parallel (TP)
+
+PP splits *between* layers. TP splits *within* a layer. A typical attention or FFN matrix multiply might be 12,288 × 12,288 — TP shards it across, say, 8 GPUs, so each GPU computes 1/8 of the heads or 1/8 of the FFN width. The partial outputs are combined with an **all-reduce** at the end of every transformer block.
+
+That all-reduce per layer is bandwidth-heavy, so TP almost always runs **inside one node** — connected by NVLink (NVIDIA's intra-node fabric, ~600 GB/s on H100). Try TP across slow Ethernet between nodes and you'll spend more time syncing than computing.
+
+The win is **lowest latency per step**: every GPU is doing useful work simultaneously on the same micro-batch. No bubble, no idle time. TP is the right answer when your cluster has NVLink and you want to fit a layer that wouldn't fit on a single GPU.
+
+## 3D Parallelism
+
+In real frontier training you don't pick one — you compose. The standard pattern in 2026 is **3D parallelism**:
+
+- **TP within a node** (NVLink keeps the per-layer all-reduces cheap).
+- **PP across nodes** (slow inter-node bandwidth is fine for PP — it only sends activations once per layer-boundary).
+- **DP across replicas of the entire pipeline** (more replicas = more throughput).
+
+<Media src="/images/blog/llm-internals-08-distributed-training/megatron-tp-pp-combo.png" alt="Megatron diagram of two transformer layers laid side-by-side, each split into Tensor MP partition #1 and Tensor MP partition #2 (vertical TP split), with the two layers themselves on separate Pipeline MP partitions (horizontal PP split). An arrow connects the output of layer 1's pipeline partition to the input of layer 2's." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2104.04473">Narayanan et al. 2021</SmartLink>, Figure 2. Each transformer layer is split *across* GPUs by TP (top vs. bottom rows of each layer); the layers themselves are split *between* GPUs by PP (layer 1 on the left, layer 2 on the right). Stack DP on top of this whole topology and you have 3D parallelism.
+</Text>
+
+A typical 70B-model training run on 64 GPUs (8 nodes × 8 GPUs per node): 8-way TP within each node (one layer split across all 8 GPUs of a node), 4-way PP across pairs of nodes, 2-way DP across the two pipeline copies. Numbers stretch (Megatron-Turing NLG 530B used 8×35×2; Llama 3.1 405B uses different ratios), but the structure is the same.
+
+## The optimizer-state problem
+
+3D parallelism solves *compute* distribution but not *memory waste*. With plain DP, every replica stores its own copy of the optimizer state — `m`, `v`, and the FP32 master weights. For a 70B model, that's ~840 GB **on every replica**. If you have 4 DP replicas, that's the same 840 GB stored four times across the cluster.
+
+Most of those copies are redundant. Every replica is going to apply the same averaged gradient to the same weights. Why not split the optimizer state across replicas, do the update locally on each, and broadcast the new weight chunks?
+
+That's the ZeRO insight (Rajbhandari et al. 2019). Stage by stage, ZeRO shards the parts that DP redundantly replicates.
+
+<Media src="/images/blog/llm-internals-08-distributed-training/zero-fig1-memory-breakdown.png" alt="ZeRO Figure 1. Four rows. Top row Baseline shows each GPU storing the full Parameters in blue, Gradients in orange, and Optimizer States in green stacked at full size, totalling 120 GB for a 7.5B model. Each subsequent row P_os, P_os+g, and P_os+g+p shows progressively more components shrunk to a 1/N_d slice with the rest of the bar grayed out, ending at 1.9 GB per GPU." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/1910.02054">Rajbhandari et al. 2019, "ZeRO"</SmartLink>, Figure 1. The baseline row is what plain DP stores on every GPU. The next three rows are ZeRO Stages 1, 2, 3 — each progressively shards more memory.
+</Text>
+
+## ZeRO Stage 1 — shard optimizer states
+
+The biggest single chunk of memory is the optimizer state: `m + v + master weights = 12Ψ` bytes per parameter (FP32). ZeRO-1 partitions this across the DP replicas. Each replica only stores its own slice of `m`, `v`, and master weights.
+
+How does the update still work? Each replica does its forward+backward as usual, all-reduces the gradients (normal DDP), and then **applies the optimizer update only to its slice** — the slice it owns. After the update, each replica broadcasts its updated weight slice to the others, so everyone has the full updated weights for the next step.
+
+Net effect: optimizer-state memory drops by a factor of `N_DP` (your DP world size). For a 70B model trained with 8-way DP, optimizer state per GPU goes from ~840 GB to ~105 GB. Activation memory is unchanged; gradient memory is unchanged; weight memory is unchanged.
+
+## ZeRO Stage 2 — shard gradients too
+
+ZeRO-1 still has every GPU holding the full gradient buffer right after backward. Stage 2 fixes this: as the backward pass produces gradients, **each GPU only keeps the slice it owns** (the slice that matches its optimizer-state slice).
+
+Mechanically, the all-reduce becomes a **reduce-scatter**: instead of every GPU getting the full averaged gradient, each GPU gets only the averaged slice it needs. Gradient memory drops by `N_DP` too.
+
+ZeRO-2 is the most common "easy win" — almost all of the memory savings of stage 3 with much lower communication cost. For most setups it's the default.
+
+## ZeRO Stage 3 — shard the weights themselves
+
+The most aggressive stage. Even the weights are sharded across DP replicas: each GPU holds only its slice. That sounds impossible — how do you do a forward pass without the full weights of each layer?
+
+Answer: **fetch-compute-discard**. Right before computing layer `l`, do an all-gather to assemble the full weights of layer `l` from all the replicas. Run the forward (or backward). Then discard the gathered weights, keeping only the local slice. Move on to layer `l+1`. Repeat.
+
+Memory savings: weights drop to `2Ψ / N_DP` per GPU. Combined with stage-1 and stage-2 savings, the total per-GPU memory budget collapses to:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-08-distributed-training/eq-sharded-budget.svg" alt="Per-GPU memory equals weights divided by N_ZeRO-3 plus gradients divided by N_ZeRO-2 plus 12 psi divided by N_ZeRO-1 plus activation memory divided by N_PP times N_TP" style={{ maxWidth: "640px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Per-GPU memory under ZeRO + PP + TP. Weights, gradients, and optimizer state are each sharded across the DP world size at their respective ZeRO stage. Activations are sharded across the PP × TP topology. Pick all four and you can fit a 405B model on a moderate cluster.
+</Text>
+
+The cost: each layer now needs an extra all-gather for weights on the way in, plus a reduce-scatter on the way out — roughly 1.5× the communication of stage 2. On NVLink-class networks this is fine; on slow Ethernet, stage 3 starts to bottleneck.
+
+## ZeRO-Offload
+
+The next memory frontier isn't sharding more — it's swapping to slower memory. **ZeRO-Offload** (Ren et al. 2021) keeps the *forward+backward* on the GPU but ships the **optimizer state and update** to the CPU.
+
+<Media src="/images/blog/llm-internals-08-distributed-training/zero-offload-fig2.png" alt="ZeRO-Offload data flow. Left side: a graph of FWD, BWD, and Param-update nodes connected by arrows showing data movement, with FP16 tensors highlighted yellow and FP32 optimizer state highlighted blue. Right side: a partition diagram with the GPU box containing only the FWD-BWD super-node and the CPU box containing the Update super-node with parameter-32, momentum-32, variance-32, and float2half all on CPU; arrows show parameter-16 going GPU-to-CPU and gradient-16 going CPU-to-GPU." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2101.06840">Ren et al. 2021, "ZeRO-Offload"</SmartLink>, Figure 2. Forward and backward stay on the GPU (cheap, parallel work). The optimizer update — `m`, `v`, master-weight, and the conversion back to FP16 — moves to the CPU. The GPU and CPU exchange only the small FP16 weights and gradients (16 bytes per param) over PCIe.
+</Text>
+
+The win: optimizer state — the biggest single chunk — doesn't sit on GPU memory at all. A 13B-parameter model that wouldn't fit for training on a single 24 GB consumer GPU can be trained with ZeRO-Offload on that same GPU plus 100+ GB of host RAM. The cost: the optimizer step is now CPU-bound and PCIe-bound rather than GPU-bound. Iteration time goes up; but the model fits.
+
+ZeRO-Offload is the answer when "I don't have a frontier cluster, but I want to train something close to one". Hobbyist fine-tunes of 70B models often run on it.
+
+## FSDP, DDP, DeepSpeed: what to call which
+
+The same ideas live under different names in different frameworks.
+
+| Concept | DeepSpeed (Microsoft) | PyTorch native |
+|---|---|---|
+| Plain replicate-model + all-reduce | n/a (use PyTorch DDP) | `DistributedDataParallel` (DDP) |
+| Shard optimizer states | ZeRO-1 | FSDP `ShardingStrategy.SHARD_GRAD_OP` (partial) |
+| Shard gradients + opt states | ZeRO-2 | FSDP `SHARD_GRAD_OP` |
+| Shard everything (weights too) | ZeRO-3 | FSDP `FULL_SHARD` (the default in modern PyTorch) |
+| Offload optimizer to CPU | ZeRO-Offload | FSDP `CPUOffload` |
+| Pipeline parallel | DeepSpeed's `PipelineModule` | `torch.distributed.pipelining` |
+| Tensor parallel | Megatron-LM (separate library) | `torch.distributed.tensor` (DTensor) |
+
+In practice, **FSDP is PyTorch's port of ZeRO-3**. They differ in implementation details (collective primitives, prefetch heuristics) but conceptually the partitioning is the same. Most production stacks pick one of: DeepSpeed (full ZeRO suite, mature, best for very large clusters) or PyTorch FSDP (simpler integration, native, good defaults). Megatron-LM remains the canonical TP+PP library and is often combined with either of the above.
+
+## What's new: ZeRO++ and FSDP2
+
+A few one-line callouts on the latest variants:
+
+- **ZeRO++** (2023) reduces ZeRO-3's communication by quantising the weights and gradients during the all-gather/reduce-scatter (e.g. INT8 for the gather, FP16 reduce). For low-bandwidth clusters this can recover most of the slowdown stage 3 introduces over stage 2.
+- **FSDP2** (PyTorch 2.4+) is a rewrite of FSDP1 using DTensor primitives — same algorithmic contract, cleaner internals, better composition with TP. It's the recommended path for new PyTorch training code in 2026.
+
+## What actually ships
+
+Real frontier-model training is rarely "pick one". The 2026 default for a 70B–400B model on a few hundred GPUs is:
+
+- **TP within a node** (8-way), powered by Megatron-LM or DTensor.
+- **PP across nodes** (4-, 8-, or 16-way), 1F1B-scheduled.
+- **DP across the rest of the cluster** (whatever's left).
+- **ZeRO-1** or **ZeRO-2** layered on top of DP for optimizer-state savings without adding stage-3 communication.
+- **Gradient checkpointing** + **FlashAttention** + **BF16 mixed precision** (Post 7).
+
+Smaller training runs that just want simplicity often skip TP and PP entirely and rely on **FSDP / ZeRO-3 alone** — slower but easier to set up and tune. Llama 3 was trained with 4D parallelism (TP × PP × CP × DP, where CP is a context-parallel split for long sequences). DeepSeek-V3 publicly reports a custom recipe combining ZeRO with their MoE-aware expert parallelism, on around 2,000 H800 GPUs — a useful reference point for what a non-OpenAI/Anthropic frontier stack actually looks like.
+
+## Coming up next
+
+Distributed pre-training takes a base model from random weights to a fluent (but unaligned, unhelpful) language predictor. Post 9 starts the second half of the training story: **continuous pre-training, full fine-tuning, and supervised fine-tuning** — how we adapt a base model into the domain-specific or instruction-following thing we actually want to deploy.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Foundational papers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Rajbhandari et al. 2019, "ZeRO: Memory Optimizations Toward Training Trillion Parameter Models." <SmartLink href="https://arxiv.org/abs/1910.02054">arxiv.org/abs/1910.02054</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Shoeybi et al. 2019, "Megatron-LM: Training Multi-Billion Parameter Models Using Model Parallelism." <SmartLink href="https://arxiv.org/abs/1909.08053">arxiv.org/abs/1909.08053</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Narayanan et al. 2021, "Efficient Large-Scale Language Model Training on GPU Clusters Using Megatron-LM." <SmartLink href="https://arxiv.org/abs/2104.04473">arxiv.org/abs/2104.04473</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Huang et al. 2018, "GPipe." <SmartLink href="https://arxiv.org/abs/1811.06965">arxiv.org/abs/1811.06965</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Harlap et al. 2018, "PipeDream: Fast and Efficient Pipeline Parallel DNN Training" (1F1B). <SmartLink href="https://arxiv.org/abs/1806.03377">arxiv.org/abs/1806.03377</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Ren et al. 2021, "ZeRO-Offload." <SmartLink href="https://arxiv.org/abs/2101.06840">arxiv.org/abs/2101.06840</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Wang et al. 2023, "ZeRO++: Extremely Efficient Collective Communication." <SmartLink href="https://arxiv.org/abs/2306.10209">arxiv.org/abs/2306.10209</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Implementations &amp; docs</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      DeepSpeed (Microsoft). <SmartLink href="https://www.deepspeed.ai/">deepspeed.ai</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      PyTorch FSDP tutorial. <SmartLink href="https://pytorch.org/tutorials/intermediate/FSDP_tutorial.html">pytorch.org</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      PyTorch DDP tutorial. <SmartLink href="https://pytorch.org/tutorials/intermediate/ddp_tutorial.html">pytorch.org</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      NVIDIA NCCL docs (collective primitives). <SmartLink href="https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/">docs.nvidia.com/nccl</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Explainer / visual content</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face, "Performance and Scalability." <SmartLink href="https://huggingface.co/docs/transformers/main/perf_train_gpu_many">huggingface.co</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Microsoft DeepSpeed blog, "ZeRO-Infinity and DeepSpeed." <SmartLink href="https://www.microsoft.com/en-us/research/blog/zero-infinity-and-deepspeed-unlocking-unprecedented-model-scale-for-deep-learning-training/">microsoft.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Sebastian Raschka, "Understanding Distributed Training." <SmartLink href="https://magazine.sebastianraschka.com/">magazine.sebastianraschka.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      DeepSeek-AI, "DeepSeek-V3 Technical Report." <SmartLink href="https://arxiv.org/abs/2412.19437">arxiv.org/abs/2412.19437</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>
