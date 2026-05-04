@@ -1,0 +1,213 @@
+---
+title: "From Pre-Training to Instruction-Tuned: CPT, FFT and SFT"
+subtitle: "How a base model that just predicts the next token becomes one that follows instructions"
+publishedAt: "2026-07-03"
+summary: "Part 9 of The LLM Internals Course. Pre-training builds knowledge; everything after pre-training shapes behaviour. We start with continued pre-training (CPT) for domain specialisation, then move into fine-tuning: full fine-tuning (FFT) updates every weight, while supervised fine-tuning (SFT) reshapes prompt-response behaviour using loss masking. Three small ideas — but they're the foundation for everything in Posts 10 and 11."
+tag: "AI"
+series: "llm-internals-course"
+part: 9
+partTitle: "CPT, FFT, SFT"
+images: []
+team: []
+---
+
+## What changes after pre-training
+
+Pre-training (Posts 7–8) takes a model from random weights to a fluent next-token predictor. Run inference on a freshly pre-trained base model and it'll happily complete "The capital of France is" with "Paris" — but ask it "What is the capital of France?" and you might get "What is the capital of Germany? What is the capital of Spain?...". Base models continue text. They don't *follow instructions*. They have no notion that an HTTP-style request expects a single answer.
+
+Everything in this post (and the next two) is about turning a base model into something useful. Three things change once pre-training ends:
+
+- **The data is labelled.** Pre-training reads raw internet text. Post-training uses curated examples — domain corpora, instruction-response pairs, preference triples — usually a few orders of magnitude smaller.
+- **The intent shifts from *adding knowledge* to *shaping behaviour*.** You're rarely teaching the model new facts after pre-training. You're teaching it which behaviour to favour when responding.
+- **The loss is selective.** In pre-training every token contributes to the loss. In post-training we often mask the prompt and only score the response — the model gets gradient signal exactly where we want it to learn.
+
+This post covers three of the gentlest things you can do to a base model: **CPT** (more pre-training, on a different distribution), **FFT** (update every weight, on labelled data), and **SFT** (the instruction-following recipe). Post 10 picks up with alignment (RLHF, DPO) and parameter-efficient fine-tuning (LoRA, QLoRA).
+
+## Continued Pre-Training (CPT)
+
+CPT is "more of the same, but on a smaller, more focused corpus". You take a base model that has seen 15T tokens of internet, and feed it another 50–500B tokens of medical journals, legal opinions, finance reports, code, or whatever specialist domain you care about. The training loop is identical to Post 7's: same cross-entropy loss, same AdamW, same data parallelism. What changes is the schedule.
+
+Three twists make CPT work without breaking the model:
+
+**Smaller learning rate.** Use roughly 10–15% of the original pre-training peak LR. The base model is already in a good basin of the loss landscape — large updates risk knocking it out.
+
+**Linear LR warm-up.** Ramp up from 0 to the (already-small) target LR over the first few hundred to a few thousand steps. This avoids a sudden gradient shock when the new domain's distribution starts pulling weights in unfamiliar directions.
+
+**Mix in 5–15% of the original pre-training data.** Pure-domain training drives a phenomenon called **catastrophic forgetting**: the model gets very good at the new distribution and visibly worse at everything outside it. (Train a base model on legal text only and it will lose general reasoning.) Mixing in a small fraction of original-distribution data acts as a regulariser — the gradients never fully forget what came before.
+
+CPT is a useful tool when (a) your domain has enough text to make a meaningful pre-training-style run, and (b) you actually want the model to internalise the *style and vocabulary* of that domain, not just respond to instructions in that domain. For most teams the answer is "we don't actually need this, SFT is enough" — but for code (Code Llama), medicine (Med-PaLM precursors), and legal (CaseLaw GPT-style models), CPT is the right call.
+
+## Full Fine-Tuning (FFT)
+
+FFT is the most direct form of fine-tuning. Update every weight in the model on a labelled dataset, with a much smaller learning rate than pre-training, often for a few thousand steps total.
+
+Mechanically, FFT is just supervised training with **all parameters trainable**. The dataset can be raw text (in which case FFT looks a lot like CPT, and the line gets blurry), or prompt-response pairs (in which case FFT becomes the most expensive flavour of SFT).
+
+Compared to CPT:
+
+- **Smaller datasets.** FFT typically uses thousands to millions of examples, not billions of tokens.
+- **Shorter runs.** A few epochs is normal; pre-training is one epoch over a much larger corpus.
+- **Lower forgetting risk** — but not zero. With a small training set and a large model, **catastrophic forgetting still happens** if you push the learning rate too high or train for too many epochs. Same mitigations apply (small LR, warm-up, optionally mixing in some general-purpose data).
+
+The big practical concern with FFT is just cost. Updating 70B parameters means storing 70B gradients + 140B optimizer states (AdamW from Post 7), the same memory bill as pre-training. For most fine-tuning use cases, that's prohibitive — which is why **LoRA and friends** (Post 10) exist. But when budget isn't the constraint and you want the model to truly internalise a new style or capability, FFT remains the gold standard.
+
+## Supervised Fine-Tuning (SFT) and Instruction Tuning
+
+This is where the terminology gets confusing. Two terms, same recipe in practice:
+
+- **Supervised Fine-Tuning (SFT):** the *how* — supervised training on prompt-response pairs.
+- **Instruction Tuning:** the *why* — teach the model to follow instructions.
+
+In modern usage they map 1:1: when a paper says "we instruction-tuned the model" they almost always mean "we did SFT on instruction-following data". The canonical example is Stanford Alpaca:
+
+<Media src="/images/blog/llm-internals-09-pretraining-to-instruction-tuned/alpaca-main.jpg" alt="Stanford Alpaca pipeline. Starts from 175 self-instruct seed tasks (with an example task: Brainstorm a list of possible New Year's resolutions, with a list output). These seeds plus text-davinci-003 generate 52,000 instruction-following examples (with another example: Brainstorm creative ideas for designing a conference room). Those 52K examples then run through Supervised Finetuning on Meta's LLaMA 7B base model to produce Alpaca 7B." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://crfm.stanford.edu/2023/03/13/alpaca.html">Stanford CRFM, "Alpaca: A Strong, Replicable Instruction-Following Model"</SmartLink>. The pipeline that put SFT on every researcher's laptop in 2023: a few hundred hand-written seed tasks expanded by a strong model into ~52K (instruction, response) pairs, then SFT on a base model.
+</Text>
+
+The dataset format is what really defines SFT. Every example is a `(prompt, response)` pair — sometimes with a system instruction, sometimes multi-turn:
+
+```json
+{
+  "prompt": "What color is the sky?",
+  "completion": "It is blue."
+}
+```
+
+The model is asked to predict the response *given* the prompt. Crucially, the loss is computed only on the response tokens — not on the prompt. That's what loss masking is.
+
+## Loss masking: the key SFT mechanic
+
+Here's the core trick that separates SFT from generic next-token prediction. The model sees the entire `prompt + response` sequence during the forward pass, and produces logits at every position. But when we compute the loss, we **ignore the positions that fall in the prompt** and only score the response tokens.
+
+<Media src="/images/blog/llm-internals-09-pretraining-to-instruction-tuned/trl-train-on-completion.png" alt="Loss masking diagram from Hugging Face TRL. Top row labelled input_ids shows a sequence of token boxes coloured by section: orange tokens for the prompt portion on the left, purple tokens for the completion portion on the right. Bottom row labelled labels shows the same sequence positions: hatched, ignored boxes underneath the orange prompt tokens; solid blue boxes underneath the purple completion tokens." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://huggingface.co/docs/trl/en/sft_trainer">Hugging Face TRL, "SFT Trainer"</SmartLink>. The model sees the whole sequence (top row). The loss only scores the completion tokens (solid blue in the bottom row); prompt tokens are masked with the special "ignore index" (–100 in PyTorch) and contribute zero gradient.
+</Text>
+
+The implementation is one line: in PyTorch, set the label for every prompt token to `-100`. The cross-entropy loss skips those positions. The gradient flows back through the rest of the network as normal, but the model is *only* updated based on how well it predicted the response.
+
+The maths is the same cross-entropy loss from Post 7, restricted to the response indices `R`:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-09-pretraining-to-instruction-tuned/eq-sft-loss.svg" alt="SFT loss equals negative one over absolute value of R times sum over t in R of log probability of x_t given x less than t under model parameters theta" style={{ maxWidth: "560px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Same cross-entropy loss as pre-training, but the sum is restricted to response token positions only. Prompt positions still affect the model's predictions (because attention can read them), but they don't get any direct gradient signal of their own.
+</Text>
+
+Why does this matter? Two reasons:
+
+- **You don't want to teach the model that "the user's question is also a thing it should generate."** Without masking, the model would learn to *complete questions like* the user does — slightly weird, and a waste of capacity.
+- **You give the model far stronger signal on what you actually care about** — the response shape, tone, and content — by concentrating all the gradient on those tokens.
+
+Loss masking is what makes "SFT on 52K Alpaca examples" actually produce a model that follows instructions, instead of a model that imitates user prompts.
+
+## The chat template
+
+Once you have prompt-response data, you need a way to **encode it into a single token sequence** that the model can tokenise and process. That's the chat template's job.
+
+A chat template is the formatting convention that turns a structured conversation into plain text with role markers, special tokens, and turn boundaries. Different model families use different conventions — there is no standard.
+
+Three common formats:
+
+```
+ChatML (OpenAI, used by Mistral, Qwen):
+<|im_start|>user
+What is the capital of France?<|im_end|>
+<|im_start|>assistant
+Paris.<|im_end|>
+
+Llama 3:
+<|begin_of_text|><|start_header_id|>user<|end_header_id|>
+What is the capital of France?<|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
+Paris.<|eot_id|>
+
+Alpaca (older, simpler):
+### Instruction:
+What is the capital of France?
+### Response:
+Paris.
+```
+
+The actual byte-level differences look trivial. The consequences are not. Three rules that are easy to get wrong:
+
+**1. Use the *same* template at training time and inference time.** If you SFT a model with ChatML and then prompt it at inference using Alpaca-style markers, the model is essentially seeing out-of-distribution input — quality drops sharply, often catastrophically.
+
+**2. The special tokens (`<|im_start|>`, `<|eot_id|>`, etc.) need to actually exist in the tokenizer.** Most modern model checkpoints ship with these tokens already in the vocab; if you fine-tune a base model with a *new* template, you need to extend the tokenizer and embed those new tokens (which is itself a small training operation).
+
+**3. Multi-turn conversations need careful loss masking.** In a conversation `user → assistant → user → assistant → ...`, you want to compute loss only on the *assistant* turns. The completion-only mask above generalises to "every assistant turn":
+
+<Media src="/images/blog/llm-internals-09-pretraining-to-instruction-tuned/trl-train-on-assistant.png" alt="Multi-turn loss masking diagram from Hugging Face TRL. Top row input_ids: alternating sections coloured by role — user turns and assistant turns in different colours across a longer sequence. Bottom row labels: hatched ignored cells under user turns and system turns; solid coloured cells under each assistant turn." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://huggingface.co/docs/trl/en/sft_trainer">Hugging Face TRL, "SFT Trainer" (assistant-only loss)</SmartLink>. Multi-turn extension of the masking idea: in a conversation, every user/system turn is masked out (hatched), and only assistant turns contribute to the loss.
+</Text>
+
+Hugging Face's `tokenizer.apply_chat_template()` is the standard way to handle all of this in modern stacks. You give it a list of `{"role": ..., "content": ...}` dicts and it produces both the formatted text and the loss mask. Get this part wrong and your fine-tune produces a model that doesn't end its turns, or rambles past the assistant boundary, or refuses to respond at all because it never saw the prompt format you're using.
+
+## FFT vs SFT: the 2×2 you can memorise
+
+People conflate FFT and SFT all the time. They are answering different questions:
+
+- **FFT** describes *how many parameters you update*: all of them.
+- **SFT** describes *what kind of data you train on*: prompt-response pairs with response-only loss.
+
+The two axes are independent. You can pick any combination:
+
+| | Raw text data | Prompt-response data |
+|---|---|---|
+| **All weights updated** (FFT) | CPT — update every weight on raw domain corpora | "Full SFT" — update every weight on instruction data |
+| **Adapter / a few weights** (PEFT) | LoRA-CPT — rare in practice | LoRA-SFT — the most common modern fine-tune |
+
+The diagonal box in the lower-right — LoRA-style PEFT applied to instruction data — is what 90% of teams actually run in 2026. We cover the parameter-efficient half of the table in Post 10.
+
+## Why SFT is a prerequisite for alignment
+
+A loose teaser for the next post: alignment methods (RLHF, DPO, etc.) take a model that already produces *plausible responses* and teach it to produce *preferred responses*. They need a starting point that's already in the right ballpark. A base model isn't — it's just a next-token predictor. SFT is what gets the model "speaking in the right format" so that alignment training has a meaningful gradient to push against.
+
+In practice the standard recipe is: pre-train → (optionally CPT) → SFT → alignment. Skip SFT and the alignment pass either does nothing useful or actively breaks the model.
+
+## Coming up next
+
+Post 10 picks up the second half of the fine-tuning story. **Alignment** — RLHF, DPO, PPO, KTO — turns a model that follows instructions into one that follows them *in the way humans prefer*. **Parameter-efficient fine-tuning** — LoRA, QLoRA, prompt/prefix tuning — does the same shaping work as FFT/SFT but updates only a tiny fraction of the parameters, making it feasible to fine-tune frontier models on a single GPU.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Continued pre-training</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Gururangan et al. 2020, "Don't Stop Pretraining." <SmartLink href="https://arxiv.org/abs/2004.10964">arxiv.org/abs/2004.10964</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Sebastian Raschka, "Continued pretraining vs fine-tuning: when to use which." <SmartLink href="https://magazine.sebastianraschka.com/p/continued-pretraining-vs-fine-tuning">magazine.sebastianraschka.com</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Supervised / instruction fine-tuning</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Wei et al. 2021, "Finetuned Language Models are Zero-Shot Learners" (FLAN). <SmartLink href="https://arxiv.org/abs/2109.01652">arxiv.org/abs/2109.01652</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Stanford Alpaca blog, "A Strong, Replicable Instruction-Following Model." <SmartLink href="https://crfm.stanford.edu/2023/03/13/alpaca.html">crfm.stanford.edu</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face TRL, "SFT Trainer." <SmartLink href="https://huggingface.co/docs/trl/en/sft_trainer">huggingface.co/docs/trl</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face, "Chat Templates." <SmartLink href="https://huggingface.co/docs/transformers/main/chat_templating">huggingface.co/docs/transformers</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Practical guides</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Sebastian Raschka, "The Practical Guide to Finetuning Open-Source LLMs." <SmartLink href="https://magazine.sebastianraschka.com/">magazine.sebastianraschka.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face TRL library. <SmartLink href="https://github.com/huggingface/trl">github.com/huggingface/trl</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>
