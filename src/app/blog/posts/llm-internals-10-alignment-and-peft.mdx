@@ -1,0 +1,258 @@
+---
+title: "Alignment & Parameter-Efficient Fine-Tuning"
+subtitle: "Teaching a model what 'good' means — and doing it without paying to train every weight"
+publishedAt: "2026-07-10"
+summary: "Part 10 of The LLM Internals Course. After SFT (Post 9), the model knows how to respond — but not necessarily how to respond *well*. This is the densest post in Part 2: the alignment progression from RLHF+PPO through DPO and KTO, then the PEFT family — LoRA, QLoRA, and prompt/prefix tuning — that makes all of it tractable on real hardware."
+tag: "AI"
+series: "llm-internals-course"
+part: 10
+partTitle: "Alignment & PEFT"
+images: []
+team: []
+---
+
+## From SFT to alignment: the goal
+
+SFT (Post 9) gave us a model that produces *one good response per prompt*. That's not enough. There are usually many plausible responses for a given prompt; SFT teaches the model to imitate one of them, but doesn't teach it to *prefer* the better one.
+
+Alignment is the post-training step that closes that gap. The new training signal is comparative: given a prompt and two candidate responses, *one is better than the other*. The model's job is to bend its probability mass toward the preferred response and away from the rejected one.
+
+Three things change mechanically from SFT:
+
+- **The data is paired.** Each training row is `(prompt, response_winner, response_loser)` — a *preference triple* — instead of `(prompt, response)`.
+- **The loss is over full responses, not per token.** SFT sums per-token cross-entropy. Alignment computes a single score per response and compares them.
+- **A reference model appears.** To stop the model from going wild — generating high-reward gibberish that doesn't even look like language — the alignment loss includes a term keeping it close to the SFT model it started from. This is the **KL guardrail**, and it shows up in essentially every alignment method.
+
+Two roads lead from here. The first, RLHF, is the original recipe. The second, DPO, is the simplification that ate the world.
+
+## Original RLHF: SFT → reward model → PPO
+
+The classic RLHF stack (Ouyang et al. 2022's InstructGPT) is three sequential training stages:
+
+1. **SFT** — covered in Post 9. Get a base instruction-following model.
+2. **Reward model (RM).** Take a copy of the SFT model, replace its language-modelling head with a single scalar output, and train it on preference triples. The RM learns to assign a higher number to `y_w` than to `y_l`. Loss: the Bradley-Terry preference probability (more on that in §4).
+3. **Policy update via PPO.** Now use the reward model as a black-box critic. The SFT model (the *policy*) generates responses, the reward model scores them, and PPO nudges the policy's weights to make high-scoring responses more likely.
+
+<Media src="/images/blog/llm-internals-10-alignment-and-peft/hf-rlhf-reward-model.png" alt="Reward model training diagram. The Initial Language Model produces several sample responses for a given prompt. Human labellers rank those responses from best to worst. The ranked outputs train the reward model, which is a separate transformer that maps prompt-response pairs to a scalar reward score." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://huggingface.co/blog/rlhf">Hugging Face, "Illustrating Reinforcement Learning from Human Feedback (RLHF)"</SmartLink>. Step 2 of the InstructGPT recipe: collect human-ranked outputs, train a separate reward model that learns to score the same way humans did.
+</Text>
+
+The PPO step is where it gets interesting — and complicated.
+
+<Media src="/images/blog/llm-internals-10-alignment-and-peft/hf-rlhf-policy.png" alt="RLHF policy update diagram. A prompt x flows into both the Initial Language Model (frozen, producing the base text) and the Tuned Language Model (the RL Policy, with parameters being updated, producing the RLHF-tuned text). The reward model scores the policy's output. The reinforcement learning update theta gets gradient of J(theta), and a KL prediction shift penalty negative lambda times KL divergence between the PPO policy and the base policy is subtracted from the reward to keep the policy close to the original." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://huggingface.co/blog/rlhf">Hugging Face, "Illustrating RLHF"</SmartLink>. The RLHF policy update. Reward signal pulls the policy toward higher-rated responses; the KL term keeps it tethered to the original SFT model.
+</Text>
+
+The full PPO clipped objective is intimidating. The version that captures the spirit, and that you'll see in essentially every alignment paper, is just two terms:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-10-alignment-and-peft/eq-ppo-handwave.svg" alt="RLHF objective: expectation over prompt and policy-sampled response of reward r-phi of x and y, minus beta times KL divergence between the policy distribution conditioned on x and the reference distribution conditioned on x" style={{ maxWidth: "640px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Hand-wave version of the RLHF objective. Maximise the reward model's score, minus a KL penalty that keeps the policy close to the SFT reference model. β controls how aggressively the model is allowed to drift; PPO adds a clipping mechanism on top of this to stop catastrophic policy updates per step, but the conceptual core is reward minus KL.
+</Text>
+
+Why is this expensive? You're now training one model (the policy) while running inference through three others (the policy itself for sampling, the reference model for KL, the reward model for scoring) — plus PPO has its own *value* model that estimates the expected return from each state. Four models in flight, plus rollouts that are inherently sequential. RLHF training runs are slow, memory-hungry, and notoriously unstable.
+
+There are two important variants to know about, both of which keep the reward-modelling step but change the labels:
+
+- **RLAIF** (Reinforcement Learning from AI Feedback) replaces human raters with a strong LLM as the labeller. Cheaper, scales, used widely in 2024–2026.
+- **Constitutional AI** (Anthropic) generates the preference data by asking the model to critique its own responses against a written constitution of principles, then trains on those AI-labelled preferences. The original RLAIF.
+
+Both substitute who gives the labels, not how the policy is trained. The PPO machinery stays the same.
+
+## DPO: skip the reward model
+
+The key insight (Rafailov et al. 2023) is that there's a closed-form relationship between the optimal policy and the reward model — and you can use it to train the policy *directly* on preference data, without ever fitting a separate reward model. No PPO, no value model, no rollouts.
+
+<Media src="/images/blog/llm-internals-10-alignment-and-peft/dpo-fig1.png" alt="DPO Figure 1: side-by-side comparison. RLHF panel on the left shows preference data flowing into a reward model trained by maximum likelihood, then a separate reinforcement learning loop where the LM policy samples completions, gets labelled rewards from the reward model, and updates. DPO panel on the right shows preference data flowing directly into a single maximum-likelihood training step that produces the final LM, with no reward model and no RL loop." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2305.18290">Rafailov et al. 2023, "Direct Preference Optimization"</SmartLink>, Figure 1. RLHF (left): two-stage pipeline with a reward model and an RL update loop. DPO (right): preferences feed straight into the LM via a single supervised loss.
+</Text>
+
+The starting point is the **Bradley-Terry model** — a 70-year-old way to express preferences as probabilities:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-10-alignment-and-peft/eq-bradley-terry.svg" alt="Probability that y_w is preferred over y_l given x equals sigmoid of reward of x and y_w minus reward of x and y_l" style={{ maxWidth: "440px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Bradley-Terry: the probability that response y_w beats y_l is the sigmoid of the reward gap. This is exactly the loss the reward model in RLHF learns to fit.
+</Text>
+
+The DPO derivation (which we won't reproduce — it's three pages of algebra) shows that the reward function in Bradley-Terry can be rewritten as a log-ratio between the policy and the reference model. Substituting that in gives the DPO loss directly in terms of the language model's own probabilities:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-10-alignment-and-peft/eq-dpo.svg" alt="DPO loss equals negative expectation over preference triples of log sigmoid of beta times log ratio of policy probability over reference probability for the winner, minus beta times log ratio of policy probability over reference probability for the loser" style={{ maxWidth: "660px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  DPO loss. β plays the same role as in RLHF — the strength of the KL guardrail. The two log-ratios are computed by running the prompt + each response through both the trainable policy and the frozen reference model. Lower loss when the policy assigns relatively more probability to the winner than the reference does, and relatively less to the loser.
+</Text>
+
+What you actually run at training time:
+
+1. For each preference triple `(x, y_w, y_l)`, compute the log-probability of `y_w` and `y_l` under both the trainable policy and the frozen reference model.
+2. Plug those four numbers into the DPO loss above.
+3. Backprop. Step the optimizer.
+
+That's it. No sampling, no rollouts, no separate reward model, no value model. One model trained, one frozen, both run forward only. DPO is what 90%+ of post-SFT alignment work uses in 2026.
+
+A practical pattern worth flagging: when DPO is run with **LoRA** (next half of the post), the reference model and the trainable policy share the *same frozen base weights* — only the LoRA adapters differ. That means you don't need to keep two full copies of the model in memory, just one base model + adapter weights. Half the memory, basically free.
+
+## KTO: when you can only get binary labels
+
+DPO needs paired preference data: for each prompt, you need both a winner and a loser. That's expensive — it requires the labeller to compare two specific responses.
+
+What if you only have **single-response thumbs up / thumbs down**? Production models accumulate this kind of data naturally — every chat session, every "👍 / 👎" click. **KTO** (Ethayarajh et al., 2024) is the alignment loss for this setting.
+
+The mechanic: instead of comparing winner vs loser within a prompt, KTO compares each response against a running *reference baseline* (essentially the average reward over recent batches). Responses scored "good" should beat the reference; responses scored "bad" should fall below it. The loss draws on prospect theory — humans are loss-averse, so the asymmetry in the loss matches the asymmetry in real human judgement.
+
+KTO matches DPO performance when you do have pairs, and outperforms it when you only have unpaired thumbs-up/thumbs-down data. For consumer-product fine-tuning loops, it's increasingly the default.
+
+## A teaser: GRPO and the reasoning post
+
+There's one more PPO variant worth flagging: **GRPO** (Group Relative Policy Optimization), the optimizer behind DeepSeek-R1's reasoning training. GRPO drops PPO's value model entirely and instead computes advantages by sampling K candidate responses per prompt and using their relative ranks. Cheap, simple, and surprisingly effective for reasoning tasks. We'll cover it in detail in Post 11.
+
+## PEFT: why update fewer parameters
+
+Everything above — RLHF, DPO, KTO — assumes you can update the model's weights. Doing that on a 70B model means storing 70B gradients + 140B optimizer-state numbers (Post 7's memory bill). For most teams, that's prohibitive.
+
+**Parameter-Efficient Fine-Tuning (PEFT)** is the family of techniques that get the same behavioural changes by training a tiny fraction of the parameters — often less than 1%. Three reasons it matters:
+
+- **Cost.** A LoRA fine-tune of a 70B model fits on a single 80 GB H100 (or sometimes a single 24 GB consumer GPU with QLoRA). FFT needs a multi-node cluster.
+- **Catastrophic forgetting (Post 9).** Updating fewer weights means less collateral damage to the base model's general capabilities.
+- **Many adapters, one base.** You can train dozens of lightweight task-specific adapters and swap them in at inference time, all sharing the same large base model. Hugely valuable for serving multi-tenant, multi-domain deployments.
+
+The dominant member of the PEFT family is LoRA.
+
+## LoRA: the rank-decomposition trick
+
+LoRA (Hu et al., 2021) freezes the entire base model and adds a tiny trainable bypass to each weight matrix.
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-10-alignment-and-peft/lora-fig1.png" alt="LoRA Figure 1: a square blue box labelled Pretrained Weights W in R d-by-d on the left, frozen. To its right, two trapezoidal blocks: B at the top (initialised to zero) and A at the bottom (initialised from a normal distribution with variance sigma squared), with a small dimension r between them. An input vector x flows up into both the frozen W and the A-then-B path; their outputs are summed at the top to produce h." style={{ maxWidth: "320px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2106.09685">Hu et al. 2021, "LoRA"</SmartLink>, Figure 1. The base weight matrix W is frozen. Two small trainable matrices A (down-projection, d×r) and B (up-projection, r×d) form a low-rank bypass. Their product is added to W's output, so the effective weight is W + BA.
+</Text>
+
+The math is one line:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-10-alignment-and-peft/eq-lora.svg" alt="W prime equals W frozen of dimension d by d plus delta W of dimension d by d, equals W plus B of dimension d by r times A of dimension r by d, with r much less than d" style={{ maxWidth: "560px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  LoRA reparameterisation. W is frozen. A and B are the only trainable parameters. The product BA is full d × d, but it's constrained to be rank-r — vastly smaller in parameter count than the full d² of W.
+</Text>
+
+For a typical LLM linear layer with `d = 4096` and `r = 16`, the LoRA bypass has `4096 × 16 + 16 × 4096 ≈ 130K` parameters versus W's `~16.7M` — about 0.8% the size. Stack a LoRA adapter on every linear layer of a 70B model and you're typically training 0.1–0.5% of the total parameter count.
+
+Two implementation details that matter:
+
+**Initialisation.** A is initialised from a small Gaussian; B is initialised to zero. So at the start of training, BA = 0 — meaning the model's behaviour is exactly the same as the frozen base. Training only nudges it away from that starting point. This is what makes LoRA so stable.
+
+**Where adapters go.** In practice, LoRA is applied to every linear projection inside transformer blocks — Q, K, V, attention output, and both FFN projections (up and down). Embeddings and layer norms are usually left alone, since they're a tiny fraction of params anyway.
+
+**A one-line rule of thumb on rank.** `r = 8` or `r = 16` is the default for most fine-tunes — enough capacity to teach style and instruction-following, small enough to stay cheap. Push to `r = 64` for tasks that ask the model to learn substantial new content (a new domain, a new modality interface). Going above `r = 128` rarely helps and starts to look more like full fine-tuning.
+
+## QLoRA: 4-bit base + 16-bit adapters
+
+QLoRA (Dettmers et al., 2023) goes one step further: keep the base model frozen *and* quantise it to 4-bit, while keeping the LoRA adapters in 16-bit (BF16) where the gradients flow.
+
+<Media src="/images/blog/llm-internals-10-alignment-and-peft/qlora-fig1.png" alt="QLoRA Figure 1: three side-by-side memory-architecture diagrams. Full Finetuning (left) shows a giant 32-bit Optimizer State pointing through 16-bit Adapter slots into a 16-bit Base Model. LoRA (middle) shows much smaller per-adapter Optimizer States flowing into the same 16-bit Base Model, with gradient flow only through the adapters. QLoRA (right) shows the same small per-adapter Optimizer States but now connected to a 4-bit Base Model, with extra paging arrows from a CPU box that swaps optimizer states in and out under memory pressure." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2305.14314">Dettmers et al. 2023, "QLoRA"</SmartLink>, Figure 1. Three regimes side-by-side. QLoRA quantises the frozen base to 4-bit NF4 and keeps the LoRA adapters at 16-bit, so the gradient still flows in high precision but the memory cost of holding the base drops by 4×.
+</Text>
+
+The two ideas that make this work:
+
+**NF4 (Normal Float 4).** A 4-bit datatype optimised for tensors whose values are roughly Gaussian-distributed around zero — which is exactly how trained transformer weights look. Each 4-bit value maps to a quantile of the standard normal, so common weight values get more representational precision than rare ones.
+
+**Double quantisation + paged optimizers.** The quantisation constants themselves are quantised (saving another ~0.4 bits per parameter on average), and AdamW's optimizer state is paged out to CPU when memory pressure spikes (similar idea to ZeRO-Offload from Post 8).
+
+The result: a 65B model can be fine-tuned on a single 48 GB A6000, or a 7B model on a single 12 GB consumer GPU. This is what unlocked hobbyist fine-tuning of frontier-scale models.
+
+## Prompt and prefix tuning
+
+Two earlier PEFT methods worth knowing for context, even though LoRA largely won.
+
+<Media src="/images/blog/llm-internals-10-alignment-and-peft/prompt-tuning-fig2.png" alt="Prompt Tuning Figure 2: side-by-side comparison. Model Tuning panel on the left shows a separate copy of the Pre-trained Model (11B params) per task, each fine-tuned for Task A, B, C. Prompt Tuning panel on the right shows a single shared 11B Pre-trained Model with a small task-specific prompt vector (20K params each) prepended to inputs from each task in a mixed-task batch." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2104.08691">Lester et al. 2021, "The Power of Scale for Parameter-Efficient Prompt Tuning"</SmartLink>, Figure 2. Model tuning copies the entire model per task; prompt tuning shares one base model and learns just a tiny per-task prompt vector.
+</Text>
+
+**Prompt tuning** (Lester et al., 2021): freeze the entire model. Add `n` learned "soft prompt" vectors (e.g., 20 vectors at the input layer), prepended to every prompt. Train only those vectors. Total trainable parameters: `n × d`, often under 50K for very large models.
+
+**Prefix tuning** (Li & Liang, 2021): same idea but the learned vectors are prepended at *every* transformer layer's keys and values, not just the input. More capacity, more parameters.
+
+Both methods work, especially for very large models (Lester's title is "The Power of Scale" — at 100B+ params, prompt tuning matches full fine-tuning on many tasks). But LoRA generally beats them for small-to-medium models, has a cleaner mental model (matrix decomposition vs prepended vectors), and composes naturally with quantisation. Modern stacks default to LoRA/QLoRA; prompt tuning shows up mainly as a baseline.
+
+## Coming up next
+
+Posts 9 and 10 covered the *behaviour-shaping* half of post-training. Post 11 picks up the third pillar — **reasoning** — and the techniques specifically aimed at improving multi-step inference. Chain-of-thought, STaR, RFT, GRPO, process vs outcome reward models, and the distillation pipelines (DeepSeek-R1 → R1-Distill, OpenAI o1 → o3-mini-style runs) that turn a small model into a reasoning model.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Alignment foundations</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Ouyang et al. 2022, "Training Language Models to Follow Instructions with Human Feedback" (InstructGPT). <SmartLink href="https://arxiv.org/abs/2203.02155">arxiv.org/abs/2203.02155</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Schulman et al. 2017, "Proximal Policy Optimization Algorithms" (PPO). <SmartLink href="https://arxiv.org/abs/1707.06347">arxiv.org/abs/1707.06347</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Christiano et al. 2017, "Deep RL from Human Preferences." <SmartLink href="https://arxiv.org/abs/1706.03741">arxiv.org/abs/1706.03741</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Bai et al. 2022, "Constitutional AI" (Anthropic). <SmartLink href="https://arxiv.org/abs/2212.08073">arxiv.org/abs/2212.08073</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">DPO and friends</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Rafailov et al. 2023, "Direct Preference Optimization." <SmartLink href="https://arxiv.org/abs/2305.18290">arxiv.org/abs/2305.18290</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Ethayarajh et al. 2024, "KTO: Model Alignment as Prospect Theoretic Optimization." <SmartLink href="https://arxiv.org/abs/2402.01306">arxiv.org/abs/2402.01306</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face TRL DPO trainer docs. <SmartLink href="https://huggingface.co/docs/trl/dpo_trainer">huggingface.co/docs/trl</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">PEFT family</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hu et al. 2021, "LoRA: Low-Rank Adaptation." <SmartLink href="https://arxiv.org/abs/2106.09685">arxiv.org/abs/2106.09685</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Dettmers et al. 2023, "QLoRA: Efficient Finetuning of Quantized LLMs." <SmartLink href="https://arxiv.org/abs/2305.14314">arxiv.org/abs/2305.14314</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lester et al. 2021, "The Power of Scale for Parameter-Efficient Prompt Tuning." <SmartLink href="https://arxiv.org/abs/2104.08691">arxiv.org/abs/2104.08691</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Li &amp; Liang 2021, "Prefix-Tuning." <SmartLink href="https://arxiv.org/abs/2101.00190">arxiv.org/abs/2101.00190</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face PEFT library. <SmartLink href="https://huggingface.co/docs/peft">huggingface.co/docs/peft</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Visual explainers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face blog, "Illustrating RLHF." <SmartLink href="https://huggingface.co/blog/rlhf">huggingface.co/blog/rlhf</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Sebastian Raschka, "LoRA From Scratch." <SmartLink href="https://magazine.sebastianraschka.com/p/lora-and-dora-from-scratch">magazine.sebastianraschka.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lilian Weng, "From Reward Hacking to Specification Gaming." <SmartLink href="https://lilianweng.github.io/posts/2024-11-28-reward-hacking/">lilianweng.github.io</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>

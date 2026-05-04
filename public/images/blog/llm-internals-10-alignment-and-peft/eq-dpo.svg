@@ -1,0 +1,156 @@
+<svg xmlns:xlink="http://www.w3.org/1999/xlink" width="68.113ex" height="6.176ex" style="vertical-align: -2.505ex;" viewBox="0 -1580.7 29326.4 2659.1" role="img" focusable="false" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<path stroke-width="1" id="E1-STIXWEBVARIANTSI-E238" d="M636 143l17 -18c-59 -60 -152 -132 -276 -132c-36 0 -62 5 -88 11c-33 7 -64 15 -110 15c-44 0 -104 -19 -149 -19l6 24c33 0 61 25 78 93l70 284c48 193 203 269 304 269c71 0 97 -55 97 -110c0 -50 -36 -83 -81 -83c-30 0 -50 24 -50 51c0 48 50 41 50 64 c0 17 -7 38 -58 38c-185 0 -130 -365 -265 -538v-4c25 17 83 22 114 22c103 0 80 -50 168 -50c58 0 118 31 173 83Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-44" d="M16 662h270c129 0 232 -32 300 -91c65 -56 99 -134 99 -237c0 -119 -47 -213 -136 -270c-62 -40 -151 -64 -252 -64h-281v19c78 5 88 18 88 96v435c0 79 -12 88 -88 93v19zM206 583v-499c0 -35 9 -47 48 -47c103 0 158 12 218 52c70 47 104 126 104 239 c0 104 -32 173 -95 228c-59 52 -122 69 -222 69c-38 0 -53 -9 -53 -42Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-50" d="M16 662h259c100 0 172 -25 217 -63c33 -28 50 -69 50 -119c0 -53 -20 -98 -57 -131c-58 -52 -107 -61 -214 -61c-26 0 -42 1 -69 3v-179c0 -76 13 -89 94 -93v-19h-280v19c78 6 84 17 84 103v429c0 74 -10 86 -84 92v19zM202 589v-258c23 -2 41 -3 61 -3 c110 0 170 57 170 147c0 110 -60 150 -196 150c-29 0 -35 -9 -35 -36Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-4F" d="M688 331c0 -206 -135 -345 -327 -345c-194 0 -327 140 -327 348c0 203 132 342 327 342c196 0 327 -147 327 -345zM574 337c0 114 -34 208 -91 256c-36 30 -76 47 -123 47c-54 0 -104 -22 -143 -67c-43 -49 -69 -146 -69 -241c0 -119 29 -209 90 -265 c34 -31 78 -45 124 -45c50 0 94 15 129 48c55 53 83 147 83 267Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-3D" d="M637 320h-589v66h589v-66zM637 120h-589v66h589v-66Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-2212" d="M621 220h-557v66h557v-66Z"></path>
+<path stroke-width="1" id="E1-STIXWEBDOUBLESTRUCK-1D53C" d="M567 0h-497v662h497v-44h-331v-255h299v-44h-299v-275h331v-44zM192 44v574h-78v-574h78Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-28" d="M304 -161l-12 -16c-158 90 -244 259 -244 429c0 185 87 329 247 424l9 -16c-139 -119 -170 -212 -170 -405c0 -186 30 -299 170 -416Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D465" d="M305 288l45 69c26 40 61 84 111 84c32 0 49 -12 49 -33c0 -19 -13 -42 -39 -42c-22 0 -27 9 -44 9c-30 0 -41 -16 -55 -38l-55 -85c30 -62 53 -197 98 -197c16 0 40 14 61 57l14 -10c-12 -15 -57 -111 -115 -111c-41 0 -60 41 -73 77l-40 113l-63 -98 c-32 -49 -61 -92 -117 -92c-36 0 -52 25 -52 47c0 16 13 37 38 37c26 0 22 -20 47 -20c12 0 38 10 70 59l65 101l-33 92c-17 48 -43 89 -98 89c-13 0 -28 -2 -38 -6l-3 18l132 33c44 -24 63 -65 75 -98Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-2C" d="M83 -141l-10 19c55 37 83 74 83 107c0 7 -6 13 -14 13s-18 -4 -29 -4c-37 0 -58 17 -58 51s24 57 60 57c45 0 80 -35 80 -87c0 -60 -43 -123 -112 -156Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D466" d="M270 307l28 -235c61 83 96 143 118 184c20 37 28 57 28 75c0 21 -52 31 -52 69c0 22 18 40 47 40c32 0 57 -23 57 -62c0 -78 -162 -318 -204 -371c-73 -92 -138 -190 -206 -190c-37 0 -56 31 -56 55c0 30 27 41 40 41c43 0 41 -31 57 -31c17 0 74 62 100 102l-38 314 c-5 45 -14 105 -70 105c-11 0 -27 -3 -36 -4l-2 16l150 25c23 -33 30 -59 39 -133Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D464" d="M531 450l-80 -289c-6 -23 -12 -46 -12 -70c0 -39 19 -61 59 -61c108 0 164 115 195 203c8 24 15 49 15 74c0 74 -59 66 -61 109c-2 36 30 42 54 42c42 0 47 -51 47 -83c0 -146 -105 -384 -276 -384c-69 0 -111 28 -111 100c0 42 12 85 23 125 c-40 -89 -122 -225 -234 -225c-56 0 -78 34 -78 87c0 33 11 64 19 95l47 177c3 9 5 19 5 29c0 24 -38 22 -54 22v15c53 9 105 23 155 44l4 -3l-81 -307c-3 -13 -11 -45 -11 -73c0 -26 6 -47 28 -47c58 1 129 114 153 151c53 81 79 159 110 269h84Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D459" d="M278 668l-148 -591s-1 -4 -1 -11s4 -13 12 -13c23 0 53 39 62 55l16 -12c-34 -40 -77 -106 -135 -106c-30 0 -39 26 -39 51c0 12 3 26 6 36l128 510c3 13 3 21 3 24c0 12 -8 22 -31 22c-7 0 -19 -2 -27 -3l-3 15Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-29" d="M29 660l12 16c153 -92 244 -259 244 -429c0 -185 -88 -327 -247 -424l-9 16c142 117 170 211 170 405c0 187 -25 302 -170 416Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-5B" d="M299 -156h-211v818h211v-25h-83c-34 0 -52 -12 -52 -48v-666c0 -40 19 -54 52 -54h83v-25Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-6C" d="M257 0h-236v15c63 5 77 22 77 77v469c0 48 -10 64 -42 64c-8 0 -21 0 -37 -2v16c69 17 106 27 158 44l5 -4v-592c0 -55 11 -68 75 -72v-15Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-6F" d="M470 231c0 -139 -90 -241 -225 -241c-121 0 -216 99 -216 238s90 232 225 232c122 0 216 -91 216 -229zM380 204c0 68 -18 137 -50 178c-24 30 -52 50 -95 50c-69 0 -116 -59 -116 -159c0 -79 16 -151 53 -205c22 -32 54 -50 90 -50c74 0 118 70 118 186Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-67" d="M470 388h-83c14 -32 19 -55 19 -84c0 -52 -16 -89 -52 -116c-32 -24 -69 -39 -104 -39c-6 0 -20 1 -38 3l-19 2c-27 -8 -60 -43 -60 -63c0 -16 24 -24 78 -27l129 -6c74 -3 121 -45 121 -107c0 -40 -19 -73 -60 -105c-52 -40 -128 -64 -200 -64c-96 0 -173 44 -173 97 c0 37 26 70 98 122c-42 20 -53 31 -53 53c0 20 13 40 46 69c15 13 29 26 43 40c-67 33 -93 71 -93 134c0 91 74 163 167 163c26 0 53 -5 80 -15l22 -8c20 -7 35 -10 55 -10h77v-39zM152 338v-3c0 -96 41 -161 103 -161c45 0 74 35 74 90c0 41 -11 86 -30 121 c-16 30 -42 47 -73 47c-46 0 -74 -35 -74 -94zM433 -64c0 37 -33 49 -124 49c-49 0 -128 6 -162 13c-40 -48 -49 -63 -49 -86c0 -44 57 -73 145 -73c114 0 190 39 190 97Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D70E" d="M547 428l-20 -73h-173c22 -63 84 -68 84 -143c0 -112 -111 -223 -256 -223c-103 0 -142 88 -142 160c0 170 130 279 260 279h247zM286 355h-2c-67 -6 -163 -92 -163 -234c0 -32 11 -102 65 -102c99 0 172 126 172 207c0 64 -39 109 -72 129Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D6FD" d="M47 -105l116 479c34 142 57 173 133 239c34 29 77 55 123 55c55 0 99 -46 99 -114c0 -73 -38 -151 -100 -179v-1c41 -11 56 -55 56 -102c0 -66 -30 -146 -63 -188c-44 -56 -110 -96 -192 -96c-25 0 -43 4 -64 21l-28 -122c-6 -28 -18 -59 -23 -70h-79c7 16 17 57 22 78z M266 459l-102 -419c17 -18 37 -23 49 -23c117 0 176 181 176 278c0 34 -5 63 -21 63c-19 0 -24 -8 -42 -8s-32 10 -32 22c0 11 11 27 47 27c8 0 30 -5 44 -5c44 0 60 99 60 124c0 46 -17 100 -61 100c-75 0 -97 -74 -118 -159Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D70B" d="M568 428l-23 -73h-112c-14 -43 -67 -171 -67 -238c0 -23 16 -48 38 -48c21 0 49 12 73 66h16c-21 -72 -74 -142 -144 -142c-40 0 -57 36 -57 75c0 23 3 43 9 62c23 71 53 141 78 225h-94c-46 -122 -77 -294 -161 -357c-11 -9 -26 -11 -38 -11c-26 0 -51 20 -51 44 c0 15 5 41 31 48c43 12 61 41 74 70l89 206c-58 0 -95 0 -139 -53h-16c44 80 108 126 212 126h282Z"></path>
+<path stroke-width="1" id="E1-STIXWEBNORMALI-1D703" d="M474 472c0 -196 -143 -483 -297 -483c-95 0 -137 59 -137 179c0 174 116 500 306 500c73 0 128 -63 128 -196zM159 344h206c15 70 25 125 25 166c0 73 -10 129 -51 129c-72 0 -154 -176 -180 -295zM356 308h-207c-16 -50 -25 -117 -25 -165c0 -69 15 -125 58 -125 c67 0 127 131 158 230c7 23 13 51 16 60Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-2223" d="M166 -189h-66v879h66v-879Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-72" d="M160 458v-92c50 72 78 94 120 94c34 0 55 -20 55 -53c0 -28 -15 -45 -39 -45c-13 0 -24 5 -40 20c-11 10 -20 15 -26 15c-28 0 -70 -50 -70 -82v-225c0 -57 17 -72 85 -75v-15h-240v15c64 12 71 19 71 69v250c0 44 -9 60 -34 60c-12 0 -21 -1 -35 -4v16 c59 19 95 33 148 54Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-65" d="M408 164l16 -7c-39 -109 -109 -167 -209 -167c-118 0 -190 89 -190 227c0 141 81 243 207 243c62 0 107 -24 139 -69c20 -28 30 -60 34 -114h-308c5 -76 10 -115 46 -163c28 -37 65 -55 111 -55c67 0 105 31 154 105zM99 309h204c-11 81 -32 115 -98 115 c-56 0 -95 -40 -106 -115Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-66" d="M21 450h82c1 80 9 116 35 161s78 72 141 72c60 0 104 -26 104 -62c0 -23 -18 -41 -42 -41c-17 0 -29 9 -45 36c-18 29 -31 39 -53 39c-38 0 -56 -30 -56 -89v-116h122v-32h-122v-314c0 -75 11 -86 93 -89v-15h-260v15c72 4 83 16 83 89v314h-82v32Z"></path>
+<path stroke-width="1" id="E1-STIXWEBSIZE3-28" d="M667 -346v-48c-284 267 -485 689 -485 1230c0 538 201 1002 485 1230v-44c-178 -184 -375 -580 -375 -1186c0 -613 197 -962 375 -1182Z"></path>
+<path stroke-width="1" id="E1-STIXWEBSIZE3-29" d="M83 2018v48c284 -267 485 -685 485 -1230c0 -534 -201 -1002 -485 -1230v44c178 184 375 580 375 1186c0 614 -197 965 -375 1182Z"></path>
+<path stroke-width="1" id="E1-STIXWEBMAIN-5D" d="M245 -156h-211v25h88c35 0 47 15 47 46v668c0 35 -13 54 -51 54h-84v25h211v-818Z"></path>
+<path stroke-width="1" id="E1-STIXWEBSIZE3-5B" d="M491 2022h-171v-2372h170v-44h-265v2460h266v-44Z"></path>
+<path stroke-width="1" id="E1-STIXWEBSIZE3-5D" d="M283 -394h-266v44h171v2372h-171v44h266v-2460Z"></path>
+</defs>
+<g stroke="currentColor" fill="currentColor" stroke-width="0" transform="matrix(1 0 0 -1 0 0)">
+ <use xlink:href="#E1-STIXWEBVARIANTSI-E238" x="0" y="0"></use>
+<g transform="translate(693,-150)">
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-44"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-50" x="722" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-4F" x="1280" y="0"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-3D" x="2765" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-2212" x="4006" y="0"></use>
+<g transform="translate(4858,0)">
+ <use xlink:href="#E1-STIXWEBDOUBLESTRUCK-1D53C" x="0" y="0"></use>
+<g transform="translate(622,-150)">
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-28" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D465" x="333" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-2C" x="884" y="0"></use>
+<g transform="translate(968,0)">
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D466" x="0" y="0"></use>
+ <use transform="scale(0.574)" xlink:href="#E1-STIXWEBNORMALI-1D464" x="611" y="-277"></use>
+</g>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-2C" x="2596" y="0"></use>
+<g transform="translate(2179,0)">
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D466" x="0" y="0"></use>
+ <use transform="scale(0.574)" xlink:href="#E1-STIXWEBNORMALI-1D459" x="611" y="-277"></use>
+</g>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-29" x="3937" y="0"></use>
+</g>
+</g>
+<g transform="translate(8600,0)">
+ <use xlink:href="#E1-STIXWEBSIZE3-5B" x="0" y="-586"></use>
+<g transform="translate(675,0)">
+ <use xlink:href="#E1-STIXWEBMAIN-6C"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-6F" x="278" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-67" x="779" y="0"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D70E" x="2121" y="0"></use>
+<g transform="translate(2668,0)">
+ <use xlink:href="#E1-STIXWEBSIZE3-28" x="0" y="-586"></use>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D6FD" x="917" y="0"></use>
+<g transform="translate(1769,0)">
+ <use xlink:href="#E1-STIXWEBMAIN-6C"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-6F" x="278" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-67" x="779" y="0"></use>
+</g>
+<g transform="translate(3048,0)">
+<g transform="translate(286,0)">
+<rect stroke="none" width="4748" height="60" x="0" y="220"></rect>
+<g transform="translate(281,709)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D70B" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D703" x="789" y="-213"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-28" x="1001" y="0"></use>
+<g transform="translate(1334,0)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D466" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D464" x="702" y="-213"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-2223" x="2757" y="0"></use>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D465" x="3301" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-29" x="3852" y="0"></use>
+</g>
+<g transform="translate(60,-711)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D70B" x="0" y="0"></use>
+<g transform="translate(558,-150)">
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-72"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-65" x="333" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-66" x="778" y="0"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-28" x="1444" y="0"></use>
+<g transform="translate(1777,0)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D466" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D464" x="702" y="-213"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-2223" x="3200" y="0"></use>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D465" x="3744" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-29" x="4295" y="0"></use>
+</g>
+</g>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-2212" x="8592" y="0"></use>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D6FD" x="9667" y="0"></use>
+<g transform="translate(10519,0)">
+ <use xlink:href="#E1-STIXWEBMAIN-6C"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-6F" x="278" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-67" x="779" y="0"></use>
+</g>
+<g transform="translate(11798,0)">
+<g transform="translate(286,0)">
+<rect stroke="none" width="4425" height="60" x="0" y="220"></rect>
+<g transform="translate(281,709)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D70B" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D703" x="789" y="-213"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-28" x="1001" y="0"></use>
+<g transform="translate(1334,0)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D466" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D459" x="702" y="-213"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-2223" x="2434" y="0"></use>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D465" x="2978" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-29" x="3528" y="0"></use>
+</g>
+<g transform="translate(60,-711)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D70B" x="0" y="0"></use>
+<g transform="translate(558,-150)">
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-72"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-65" x="333" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBMAIN-66" x="778" y="0"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-28" x="1444" y="0"></use>
+<g transform="translate(1777,0)">
+ <use xlink:href="#E1-STIXWEBNORMALI-1D466" x="0" y="0"></use>
+ <use transform="scale(0.707)" xlink:href="#E1-STIXWEBNORMALI-1D459" x="702" y="-213"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBMAIN-2223" x="2877" y="0"></use>
+ <use xlink:href="#E1-STIXWEBNORMALI-1D465" x="3421" y="0"></use>
+ <use xlink:href="#E1-STIXWEBMAIN-29" x="3972" y="0"></use>
+</g>
+</g>
+</g>
+ <use xlink:href="#E1-STIXWEBSIZE3-29" x="16797" y="-586"></use>
+</g>
+ <use xlink:href="#E1-STIXWEBSIZE3-5D" x="20217" y="-586"></use>
+</g>
+</g>
+</svg>

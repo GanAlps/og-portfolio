@@ -1,0 +1,1 @@
+\mathcal{L}_{\text{RLHF}} \;=\; \underbrace{\mathbb{E}_{\,(x,\,y)\sim\pi_{\theta}}\!\left[\, r_{\phi}(x,\,y) \,\right]}_{\text{maximise reward}} \;-\; \beta\, \underbrace{\operatorname{KL}\!\left(\, \pi_{\theta}(\cdot\mid x) \,\Big\|\, \pi_{\text{ref}}(\cdot\mid x) \,\right)}_{\text{stay close to reference (SFT) model}}
