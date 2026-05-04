@@ -78,13 +78,10 @@
 .composer {
   border-top: 1px solid var(--neutral-alpha-weak);
   padding: var(--static-space-8);
-  display: flex;
-  gap: var(--static-space-8);
-  align-items: flex-end;
 }
 
 .textarea {
-  flex: 1;
+  width: 100%;
   min-height: 40px;
   max-height: 120px;
   padding: var(--static-space-8);
