@@ -1,0 +1,1 @@
+M_{\text{per-GPU}} \;=\; \underbrace{\frac{2\Psi}{N_{\text{ZeRO-3}}}}_{\text{weights}} \;+\; \underbrace{\frac{2\Psi}{N_{\text{ZeRO-2}}}}_{\text{gradients}} \;+\; \underbrace{\frac{12\Psi}{N_{\text{ZeRO-1}}}}_{\text{Adam state (m + v + master)}} \;+\; \underbrace{\frac{M_{\text{act}}}{N_{\text{PP}} \cdot N_{\text{TP}}}}_{\text{activations}}

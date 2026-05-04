@@ -1,0 +1,191 @@
+---
+title: "Teaching Models to Reason — and Distillation"
+subtitle: "Chain of thought, the STaR loop, GRPO, and how big models teach small ones to think"
+publishedAt: "2026-07-17"
+summary: "Part 11 of The LLM Internals Course. Reasoning models like DeepSeek-R1 emerge from a multi-step recipe: fine-tune to produce thinking tokens, bootstrap with the STaR loop, then push hard with reinforcement learning. We trace that recipe, contrast PPO with GRPO, look at process vs outcome reward models, and close with model distillation — the natural follow-on, since STaR and RFT are themselves a form of self-distillation."
+tag: "AI"
+series: "llm-internals-course"
+part: 11
+partTitle: "Reasoning & Distillation"
+images: []
+team: []
+---
+
+## What "reasoning model" actually means
+
+A standard LLM, given "What's 17 × 24?", goes straight from prompt to answer. It might guess "408" (correct) or "418" (wrong) — but you don't get to see the work. A reasoning model, given the same question, *thinks first*: produces a stream of intermediate tokens that work through the problem, *then* commits to an answer.
+
+That distinction — emit thinking tokens before answering — is the entire game. Models trained this way are dramatically better at multi-step problems (math, code, planning) because errors that would have been single-shot guesses become multi-step computations the model can self-correct.
+
+The technique that started it all is **chain of thought (CoT)** prompting. With nothing more than a few example questions whose answers include intermediate reasoning steps, the model learns at inference time to imitate that pattern.
+
+<Media src="/images/blog/llm-internals-11-reasoning-and-distillation/cot-fig1.png" alt="Chain-of-Thought Prompting Figure 1: side-by-side comparison. Standard Prompting panel (left) shows a model input with one example Q-and-A (Roger has 5 tennis balls problem with answer 11) followed by a new question about apples. Standard model output is wrong: The answer is 27 with a red X. Chain-of-Thought Prompting panel (right) shows the same setup but the example answer is rewritten with explicit reasoning steps highlighted in blue. The model then outputs a correct multi-step answer in green: The cafeteria had 23 apples originally, used 20 for lunch, that leaves 3, then bought 6 more so they have 9. Marked with a green checkmark." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2201.11903">Wei et al. 2022, "Chain-of-Thought Prompting Elicits Reasoning in LLMs"</SmartLink>, Figure 1. Standard prompting (left) gets the wrong answer; the same model with reasoning shown in the few-shot examples (right) walks through the problem and gets it right.
+</Text>
+
+CoT showed the capability was *latent* in large models — they could already reason, you just had to prompt for it. The reasoning-model era is about training that capability in directly, so you don't need few-shot examples. A modern reasoning model (R1, o1, Gemini Thinking) emits something like:
+
+```
+<think>
+Let me work through this. 17 × 24 = 17 × 25 - 17 = 425 - 17 = 408.
+Actually let me double-check: 17 × 20 = 340, 17 × 4 = 68, 340 + 68 = 408. ✓
+</think>
+The answer is 408.
+```
+
+Three training stages get a base model from "predicts next token" to "produces structured reasoning + correct answer". Walk through them in order.
+
+## Stage 1: SFT to produce thinking tokens
+
+The first move is mechanical: teach the model the *format*. Collect or generate a corpus of `(question, reasoning, answer)` triples, then SFT (Post 9) on them with the standard response-only loss.
+
+The data usually comes from a strong teacher model. For DeepSeek-R1, the team had earlier models generate hundreds of thousands of `<think>...</think>` traces, then human-filtered and rule-filtered the ones that arrived at correct answers. Stanford Alpaca's data-generation pattern, generalised to reasoning.
+
+After this stage, the model knows the format — it'll happily emit `<think>` tokens and a final answer. But it isn't *good* at reasoning yet. It's just imitating thinking-shaped text. SFT teaches the surface of reasoning, not the substance.
+
+## Stage 2: bootstrap with STaR
+
+The Self-Taught Reasoner (Zelikman et al., 2022) is an elegant self-improvement loop. Start with a model that can sometimes solve problems with reasoning. Have it solve a batch of problems. Keep the ones it got right. Fine-tune on those. The model improves. Repeat.
+
+<Media src="/images/blog/llm-internals-11-reasoning-and-distillation/star-fig1.png" alt="STaR Figure 1: a flow diagram showing the self-taught reasoner loop. A Question goes into a Language Model which generates a Rationale and Answer. If the Answer is correct (green check), the resulting Question-Rationale-Answer triple feeds back into a Finetune step (dashed line) that updates the language model. If the Answer is wrong (red X), the Question is paired with a Hint (the ground-truth answer) and sent through a Rationalize step that asks the model to backsolve a rationale for the known answer; if the resulting rationale arrives at the correct answer, that triple also feeds the fine-tune step. To the right, a worked example: a multiple-choice question about what can be used to carry a small dog, with the model producing a rationale that arrives at answer (b) basket." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2203.14465">Zelikman et al. 2022, "STaR: Bootstrapping Reasoning With Reasoning"</SmartLink>, Figure 1. The forward loop generates and filters; the rationalisation branch handles questions the model couldn't solve unaided by giving it the answer and asking for the working backwards.
+</Text>
+
+The clever twist is **rationalisation**. When the model fails on a question, don't throw the example out. Instead, hand the model the correct answer and ask it to produce a chain of reasoning that arrives there. If the rationalised reasoning is plausible, add `(question, rationalised reasoning, correct answer)` to the training set. This unlocks the harder questions the base model couldn't yet solve, and turns out to be roughly half of STaR's gains in practice.
+
+A close cousin, **RFT (Rejection Fine-Tuning)**, drops the rationalisation step and instead samples many candidate solutions per question at high temperature, keeping all the correct ones. More data per question, more diverse reasoning paths — at the cost of needing more compute up front.
+
+After STaR/RFT, the model is genuinely better at reasoning. But it's still bounded by the questions it can already partially solve. To push past that, you need RL.
+
+## Stage 3: reinforcement learning for reasoning
+
+This is where reasoning training diverges sharply from the alignment training in Post 10.
+
+Recall the alignment story: humans rank pairs of responses, you train a reward model to imitate that ranking, then PPO or DPO bends the policy toward the preferred direction. The reward signal is *subjective* — it's a learned approximation of human taste.
+
+Reasoning training has a much better signal. The reward is *objective and verifiable*:
+
+- **Math problem?** Check the final number.
+- **Code problem?** Compile it. Run the unit tests.
+- **Multiple-choice?** Compare to the gold label.
+- **Format compliance?** Regex on `<think>` tags, response length budget, etc.
+
+No reward model, no human labelling. Just a deterministic check that returns a scalar. This is a huge unlock — it removes the slowest, most expensive part of RLHF (reward-model training and preference labelling) and lets you scale RL to massive amounts of training data.
+
+What stays the same: a KL guardrail keeping the policy close to a reference SFT model (so it doesn't forget how to write coherent text), and an iterative training loop where the policy generates → reward is computed → policy updates.
+
+What changes: which RL algorithm you use to compute the gradient.
+
+## PPO recap → why GRPO
+
+Post 10 covered PPO at a hand-wave level: maximise reward, minus β times KL. PPO needs a separate **value model** that estimates the expected reward from each intermediate token — used to compute the advantage function `Â = reward − value baseline`. The value model is roughly the same size as the policy, doubles your training memory, and is fiddly to train alongside the policy.
+
+GRPO (Group Relative Policy Optimization, Shao et al. 2024 in DeepSeekMath) is the simplification that's now standard for reasoning training. **Skip the value model entirely.** Instead, for each prompt, sample K candidate responses from the current policy, compute their rewards, and use the *group statistics* as your baseline:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-11-reasoning-and-distillation/eq-grpo-advantage.svg" alt="Estimated advantage A-hat-i equals reward r_i minus the mean of rewards r_1 through r_K, divided by the standard deviation of rewards r_1 through r_K" style={{ maxWidth: "560px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  GRPO advantage: how much better than the group's average each candidate response is, normalised by the group's spread. Positive advantage → push policy toward this response. Negative → push away.
+</Text>
+
+<Media src="/images/blog/llm-internals-11-reasoning-and-distillation/grpo-fig4.png" alt="DeepSeekMath Figure 4 comparing PPO and GRPO. PPO row at top: a question q feeds the Policy Model to produce one output o, which is then scored by three separate models — Reference Model (frozen, computes KL), Reward Model (frozen, computes reward r), and Value Model (trained alongside the policy, computes value v). r and v feed into a GAE computation that produces the advantage A. GRPO row at bottom: the same question q feeds the Policy Model which generates a group of K outputs o_1 through o_G. Each output is scored by the Reference Model (KL) and Reward Model (rewards r_1 through r_G). A Group Computation step produces advantages A_1 through A_G directly from the group of rewards — no Value Model. A legend on the right marks Trained Models in yellow and Frozen Models in blue." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2402.03300">Shao et al. 2024, "DeepSeekMath"</SmartLink>, Figure 4. Same prompt, same reward model, same KL penalty — but GRPO's advantage estimation comes from a group of sampled responses, not from a learned value model. One fewer trained model means roughly half the GPU memory.
+</Text>
+
+In practice K is usually 8–16 candidates per prompt. The group must contain a mix of correct and incorrect answers for the advantage signal to be informative — if all K are correct or all wrong, the advantages are zero and that batch contributes nothing.
+
+GRPO is cheaper, simpler, and roughly as effective as PPO for verifiable-reward domains. It's now the default for reasoning training.
+
+### Case study: DeepSeek-R1
+
+The most striking result of 2025 was DeepSeek-R1, which showed that **GRPO alone — no SFT cold-start — can teach a base model to reason**. The team took DeepSeek-V3 base, skipped any reasoning SFT, and ran GRPO directly with format and accuracy rewards. The model spontaneously developed long chains of `<think>` tokens, self-correction behaviour, and "aha moments" where it explicitly reconsiders earlier steps. They called this configuration **R1-Zero**.
+
+R1-Zero had quirks (mixed languages, occasionally illegible reasoning), so the released **R1** added a small amount of reasoning SFT for cold-start, then alternated SFT and GRPO across multiple stages. The headline though is R1-Zero: pure RL on a strong base model is enough to elicit reasoning, the SFT stage is convenience, not necessity.
+
+## Process vs outcome reward models
+
+Reward functions for reasoning come in two shapes:
+
+- **Outcome Reward Model (ORM):** scores only the final answer. Got it right? +1. Wrong? 0. Simple, robust.
+- **Process Reward Model (PRM):** scores *each step* in the chain of reasoning. Step 1 valid? Step 2 valid? Step 3 valid? Aggregate.
+
+PRMs are more informative because they assign credit at the step level. If the model reasoned correctly for 9 steps and made a small arithmetic error in step 10, an ORM gives it 0; a PRM gives credit for the first 9 steps and penalises only the last. That's a much richer training signal — and it shows up clearly when both are used as inference-time verifiers:
+
+<Media src="/images/blog/llm-internals-11-reasoning-and-distillation/verify-prm-vs-orm.png" alt="Plot comparing PRM, ORM, and Majority Voting as best-of-N verifiers. Y-axis: percent of MATH problems solved (best-of-N), from 62 to 78. X-axis: log-scale N from 10 to 1000+ solutions per problem. Three lines: orange Process-Supervised RM climbs steadily from 67 to 78; blue Outcome-Supervised RM climbs from 67 to 72 then plateaus; gray Majority Voting climbs from 63 to 70 then plateaus. A small table above shows percent-solved at best-of-1860: ORM 72.4, PRM 78.2 (bold), Majority Voting 69.6." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2305.20050">Lightman et al. 2023, "Let's Verify Step by Step"</SmartLink>, Figure 3. PRM (orange) keeps improving as you sample more candidate solutions per problem and rank them; ORM (blue) and majority voting (grey) plateau much earlier. The credit-assignment-per-step matters.
+</Text>
+
+The catch: PRMs are *expensive to train*. ORMs need only a question and a final answer (cheap — same data you already have for the reasoning SFT). PRMs need step-level labels — for every step in every solution, "is this correct so far?" — which require expert human labellers. OpenAI's PRM800K dataset (the basis for "Let's Verify Step by Step") cost roughly **800,000 step labels** of mathematician time. That's why ORMs remain the default for most production reasoning training, with PRMs reserved for the highest-stakes domains (advanced math, formal verification) where the signal density is worth the labelling cost.
+
+PRMs also show up at **inference time** as best-of-N verifiers: generate 64 candidate solutions, score each with the PRM, pick the highest. This is one of the cheap ways to boost reasoning accuracy on a fixed model — no training needed, just more inference compute.
+
+## Distillation: the natural follow-on
+
+STaR is, technically, a form of *self-distillation* — the model is producing the data it then trains on, with the correctness check acting as the teacher. The general framing applies to two distinct techniques.
+
+**Data distillation.** A strong "teacher" model generates training data; a smaller "student" model fine-tunes on that data. By far the most common form. Stanford Alpaca (Post 9) was data distillation from text-davinci-003 into LLaMA-7B. DeepSeek-R1-Distill-Qwen-32B was data distillation from R1 into Qwen — at a fraction of R1's size, with most of its reasoning ability intact. Modern open-weight model releases now routinely include a distilled family of smaller variants.
+
+**Logit distillation.** Instead of training the student on the teacher's *generated tokens*, train it to match the teacher's full *probability distribution* over the next token. The student gets a far richer signal — not just "the right answer is X" but "X is 0.62, Y is 0.21, Z is 0.08 and everything else is near zero". Closer to the teacher's actual knowledge.
+
+Logit distillation is more powerful per token but requires the teacher's logits, which means access to the teacher's weights. Mostly used inside the training pipeline of a single organisation: training small reward models, training speculative-decoding draft models (Post 5), and the original Hinton-style model compression. Most public model-distillation work is data distillation simply because logits are rarely shared.
+
+## Coming up next
+
+Posts 9–11 covered the post-pre-training story: gentle adaptation (CPT, FFT, SFT), preference shaping (RLHF, DPO, KTO), and reasoning (CoT, STaR, GRPO) plus the distillation that follows from all of it. Part 2 of the course is now done.
+
+Part 3 — Multi-Modal — opens with **Post 12: Specialised Text LLMs**. Coding models (Code Llama, DeepSeek-Coder, Qwen-Coder) and multilingual models — both are still text-only, but illustrate how the training recipes from Posts 7–11 are tuned for specific data distributions.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Chain of Thought &amp; reasoning bootstrapping</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Wei et al. 2022, "Chain-of-Thought Prompting Elicits Reasoning in LLMs." <SmartLink href="https://arxiv.org/abs/2201.11903">arxiv.org/abs/2201.11903</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Zelikman et al. 2022, "STaR: Bootstrapping Reasoning With Reasoning." <SmartLink href="https://arxiv.org/abs/2203.14465">arxiv.org/abs/2203.14465</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Yuan et al. 2023, "Scaling Relationship on Learning Mathematical Reasoning" (RFT). <SmartLink href="https://arxiv.org/abs/2308.01825">arxiv.org/abs/2308.01825</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">RL for reasoning</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Shao et al. 2024, "DeepSeekMath" (introduces GRPO). <SmartLink href="https://arxiv.org/abs/2402.03300">arxiv.org/abs/2402.03300</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      DeepSeek 2025, "DeepSeek-R1: Incentivizing Reasoning via RL." <SmartLink href="https://arxiv.org/abs/2501.12948">arxiv.org/abs/2501.12948</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lightman et al. 2023, "Let's Verify Step by Step" (PRMs + PRM800K). <SmartLink href="https://arxiv.org/abs/2305.20050">arxiv.org/abs/2305.20050</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Distillation</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hinton et al. 2015, "Distilling the Knowledge in a Neural Network." <SmartLink href="https://arxiv.org/abs/1503.02531">arxiv.org/abs/1503.02531</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face blog, "Knowledge Distillation Explained." <SmartLink href="https://huggingface.co/blog/Lin-K76/an-introduction-to-knowledge-distillation">huggingface.co</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Visual explainers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Sebastian Raschka, "The State of LLM Reasoning Model Inference." <SmartLink href="https://magazine.sebastianraschka.com/">magazine.sebastianraschka.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lilian Weng, "Reasoning with Language Model Prompting." <SmartLink href="https://lilianweng.github.io/posts/2023-03-15-prompt-engineering/">lilianweng.github.io</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>
