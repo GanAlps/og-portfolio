@@ -1,0 +1,260 @@
+---
+title: "Specialised Text LLMs: Coding & Multilingual"
+subtitle: "Same architecture, different vocab and training signal — the bridge from pure text into multi-modal"
+publishedAt: "2026-04-30"
+summary: "Part 12 of The LLM Internals Course. Coding LLMs and multilingual LLMs use the same transformer everyone else does — what makes them specialised is tokenization, training format, and the reward signal. We unpack code-aware vocab, fill-in-the-middle training, repo-level context, and RLAIF on unit tests; then look at why one model can speak fifty languages without separate per-language weights."
+tag: "AI"
+series: "llm-internals-course"
+part: 12
+partTitle: "Coding & Multilingual LLMs"
+images: []
+team: []
+---
+
+## Same engine, different fuel
+
+The opening posts of this series taught one transformer. The next ten taught how to make that transformer faster (Posts 2–6), bigger (Posts 7–8), better-aligned (Posts 9–10), and able to reason (Post 11). Across all of that, the architecture barely moved. Attention is still attention; FFNs are still FFNs.
+
+Specialised text LLMs continue that pattern. **Code Llama, DeepSeek-Coder, Qwen-Coder, Codestral — none of them invented a new architecture.** They are the same decoder-only transformer trained with a different tokenizer, a different training format, and a different reward signal. The same is true on the multilingual side: a single LLM speaks fifty languages by expanding its vocabulary, not by adding new layers per language.
+
+This post is the bridge from pure-text training (Posts 7–11) into the modality variations of Part 3. Two specialisations — code and language — both still emit text tokens, but each one tweaks the recipe in instructive ways.
+
+## Code tokenization is special
+
+Tokenizers are normally trained on natural language, where the unit that compresses well is "common English word fragment". Run that same tokenizer on Python and it falls over. Whitespace becomes a horde of one-byte tokens. `fibonacci` gets split into three subword pieces. Frequent idioms like `import numpy as np` are six tokens of natural-language soup instead of one well-known phrase.
+
+Code-aware tokenizers fix this in three ways:
+
+1. **Whitespace gets its own dedicated tokens.** A 4-space indent is one token, not four. An 8-space (nested) indent is one token, not eight. This matters enormously for Python — a 200-line function with deep nesting has thousands of indent characters, all of which collapse to a tiny number of tokens.
+2. **Keywords are dedicated tokens.** `def`, `return`, `import`, `class`, `function`, `const` — the language's reserved words appear so often in code that BPE assigns each one a single ID rather than splitting it.
+3. **Frequent idioms collapse.** `return null;`, `import numpy as np`, `console.log(`, `if __name__ == "__main__":` — these multi-token patterns get merged into single tokens during BPE training because they appear millions of times in code corpora.
+
+The effect is dramatic. Compare how an old natural-language tokenizer (GPT-2's, trained on web text) and a modern code-aware one (`cl100k_base`, used by GPT-4) split a tiny Python function:
+
+<Media src="/images/blog/llm-internals-12-coding-and-multilingual-llms/code-tokenizer-comparison.png" alt="Side-by-side tokenizer comparison. Top panel: GPT-2 tokenizer breaks a small Python function (def add(a, b): return a + b) into 16 tokens, with each indent space appearing as its own token and the newline-plus-spaces sequence broken up character by character. Bottom panel: cl100k_base tokenizer splits the same function into 12 tokens, with the indentation chunked into a single multi-character token and (a fused into one token after the open paren." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  GPT-2 (top) vs cl100k_base (bottom) tokenising a small Python function. Same code, fewer tokens — and the savings compound: a 200-line file at 30%+ fewer tokens means 30% less inference cost and 30% more code that fits in a fixed context window. Generated with <SmartLink href="https://github.com/openai/tiktoken">openai/tiktoken</SmartLink>.
+</Text>
+
+The most useful audit you can run on a coding model's tokenizer is to dump the *most frequent tokens* and look at the top 100. A natural-language tokenizer's top-100 will be `the`, `of`, `and`, ` to`, `'s`, etc. A code-aware tokenizer's will be heavy with `    ` (indent), `\n`, `=`, `(`, `)`, `;`, `return`, `if`, `:` and so on. Looking at the tokenizer alone tells you what the model sees a lot of — and what it's optimised for.
+
+## Fill-in-the-Middle: the most important difference
+
+Pre-training on next-token prediction is fine if your only use case is "user types a prompt, model writes a continuation". That's not what coding usage looks like. A developer in an editor has code *above* the cursor (the prefix they've already written) and code *below* the cursor (the rest of the function, the next function, the rest of the file). They want the model to fill the *middle*.
+
+A vanilla next-token model cannot do this — it only ever sees a prefix. Tab-complete at line 50 of a 100-line file would have to ignore lines 51–100 entirely.
+
+The fix is to teach the model the format during training. Bavarian et al. (2022) showed that you can take any decoder-only LLM, take a large fraction of training documents, and rearrange them:
+
+- Pick a random split point in the document.
+- Cut into prefix, middle, suffix.
+- Concatenate as `<PRE> prefix <SUF> suffix <MID> middle <EOM>` (or the equivalent SPM ordering).
+- Train next-token loss as usual.
+
+The model still does pure next-token prediction. But because the training data has been reordered, the model learns: when I see a `<SUF>` block followed by a `<MID>` token, I should *predict text that fits in the gap between the prefix and the suffix*.
+
+<Media src="/images/blog/llm-internals-12-coding-and-multilingual-llms/fim-code-example.png" alt="Code editor screenshot from the FIM paper. A Python function for sorting a list with deduplication is shown, where the middle expression sorted(list(set(l))) is highlighted in green to indicate the span the FIM-trained model is asked to fill in given the surrounding prefix above and suffix below the cursor." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2207.14255">Bavarian et al. 2022, "Efficient Training of Language Models to Fill in the Middle"</SmartLink>. The green span is what the model fills given the prefix and suffix around it. Same model, same loss — just rearranged training documents.
+</Text>
+
+At inference time, the editor places the user's cursor position. Code above the cursor becomes the prefix, code below becomes the suffix, and the model is queried with `<PRE> prefix <SUF> suffix <MID>` — it then generates tokens to fill the middle until it emits `<EOM>`.
+
+<Mermaid maxWidth="280px" chart={`flowchart TB
+    A["Training document"] --> B["Split into<br/>prefix · middle · suffix"]
+    B --> C["Reorder:<br/>PRE · SUF · MID"]
+    C --> D["Next-token<br/>loss as usual"]
+    D --> E["Model infills<br/>middle from edges"]`} />
+
+Bavarian's headline result is the **FIM-for-free property**: training a model with FIM-formatted data does *not* hurt its left-to-right (prefix-only) performance. You get bidirectional infilling and lose nothing on standard generation. That's why every modern coding LLM (Code Llama, DeepSeek-Coder, StarCoder, Codestral, Qwen-Coder) trains with FIM by default — typically on 50–90% of training documents.
+
+This is the single biggest reason a "coding model" is not just "a chat model fine-tuned on code". The training *format* is fundamentally different.
+
+## Long context: why code lives at 32K–128K
+
+The context-window-extension techniques from Post 6 (RoPE, NTK-aware scaling, YaRN, position interpolation) show up in coding LLMs as a real production necessity, not a research curiosity. Three reasons:
+
+1. **Files get long.** A single file in a real codebase routinely runs 1000–5000 lines. At ~30 tokens per line of code, a single file is 30K–150K tokens. A 4K context window can't even hold one file.
+2. **Repos are bigger than files.** The interesting prompts are not "complete this function" but "edit this function knowing what these other ten files in the repo do". You want enough context for callers, callees, type definitions, configuration files, and the relevant tests.
+3. **Reasoning chains are long.** A coding agent that runs tools (read file, run tests, edit file, re-run tests) accumulates context fast. 32K is a tight ceiling; 128K is comfortable.
+
+That's why Code Llama's release pipeline has an explicit "long context" stage — the base model is trained at 4K, then continued-pretrained at 16K with RoPE base frequency rescaled, then often pushed further. The same RoPE/YaRN tricks from Post 6 do the heavy lifting; the coding-specific bit is just where in the recipe the long-context stage lives.
+
+## Repo-level awareness
+
+The next refinement after FIM is teaching the model that code lives in *files inside repositories*, not in isolated snippets. Single-file FIM only gets you so far — when a developer writes `from auth.service import AuthService`, the model needs to know what's in `auth/service.py`.
+
+The standard recipe is to construct **repo-level training documents**. Take a real GitHub repository, walk its file tree, and concatenate files into a single training sample with file-path delimiters:
+
+```
+<repo_name>my-app</repo_name>
+<file>src/auth/service.py</file>
+<content>
+class AuthService:
+    def login(...): ...
+</content>
+<file>src/auth/handlers.py</file>
+<content>
+from auth.service import AuthService
+...
+</content>
+```
+
+Then run normal next-token + FIM training on top. The model learns that `<file>...<content>` blocks are how files are presented, learns that imports across files refer back to earlier `<file>` blocks, and at inference time can be given the same structure: serialise the relevant repo files in this format and the model will treat it as a coherent multi-file context.
+
+DeepSeek-Coder's training pipeline does this explicitly, building 16K-token "project-level" samples by topologically sorting files based on import dependencies — important files (modules that get imported a lot) appear earlier in the context so by the time the model sees a dependent file, it has already seen the definitions it imports.
+
+This is the bit of training that turns a "code completion model" into a "repo-aware model". Editor integrations like Cursor or Continue then exploit this directly: when you ask for an edit, the editor picks the most relevant files in your repo and stuffs them into a prompt formatted exactly like the model's training data.
+
+## RLAIF on objective rewards
+
+Coding has a luxury other LLM domains don't: **you can compile and run the output**. That changes what the alignment stage of training looks like.
+
+Recall from Post 10 that standard RLHF needs a learned reward model — humans rank pairs of model outputs, you train a small reward model to imitate those rankings, then PPO bends the policy in the rewarded direction. Reward signal is *subjective*; it's a learned approximation of human taste. Slow to label, expensive to scale.
+
+For code, a much better signal is available. Generate a candidate solution, then run it. The reward is a deterministic function:
+
+- Did it **compile** / parse / pass the type checker? +1.
+- Did it pass the **unit tests**? +1 per passing test.
+- Did it pass the **hidden held-out tests** the developer didn't see during generation? +large.
+- Did it **run faster** than the previous attempt? Bonus.
+- Format compliance (no infinite loops, completes in a budget): scalar penalty.
+
+This is **RLAIF** (Reinforcement Learning from AI Feedback) — no human labellers, no learned reward model, just an *executor*. It connects directly to the GRPO recipe from Post 11: sample K candidate solutions per problem, run each through the executor, use the resulting rewards as the group baseline.
+
+<Mermaid maxWidth="380px" chart={`flowchart TB
+    P["Coding problem<br/>(prompt + tests)"] --> S["Sample K candidate<br/>solutions from policy"]
+    S --> E["Execute each candidate:<br/>compile → run tests → measure perf"]
+    E --> R["Per-candidate reward<br/>(deterministic, no human)"]
+    R --> A["Compute group advantages<br/>Â = (r - mean) / std"]
+    A --> U["GRPO policy update<br/>+ KL penalty to SFT model"]
+    U --> S`} />
+
+The whole point of Post 11's reasoning RL — verifiable rewards being qualitatively different from preference rewards — applies even more strongly to coding. Code is the *purest* verifiable-reward domain text-only LLMs have. It's why coding benchmarks (HumanEval, MBPP, LiveCodeBench, SWE-bench) keep climbing faster than benchmarks for subjective tasks: the training signal is denser, faster to compute, and immune to reward-model gaming.
+
+## The full coding-LLM recipe
+
+Putting the pieces together, a modern open-weights coding model is built in roughly five stages on top of a strong general base model:
+
+<Media src="/images/blog/llm-internals-12-coding-and-multilingual-llms/codellama-pipeline.png" alt="Code Llama specialization pipeline diagram. The flow starts with the Llama 2 foundation model (general base, 2T tokens), which is continued-pretrained on 500B tokens of code and code-related data to produce Code Llama. From Code Llama, three branches emerge: an Infilling branch (additional FIM training, 7B and 13B sizes), a Long-context branch (16K context fine-tuning, 7B/13B/34B/70B), and from those a Python-specialist branch (additional 100B Python-heavy tokens) and an Instruct branch (instruction fine-tuning on coding tasks). The diagram shows token counts at each stage." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2308.12950">Rozière et al. 2023, "Code Llama"</SmartLink>, Figure 2. Same five-stage pattern is visible in DeepSeek-Coder, StarCoder, Qwen-Coder. Each stage corresponds to one of the techniques covered in this series: continued pre-training (Post 9), FIM (this post), context extension (Post 6), instruction tuning (Post 9), RL with verifiable rewards (this post + Post 11).
+</Text>
+
+Notice how every box in this pipeline maps to a technique from earlier in the course:
+
+- **Continued pre-training on a code-heavy mix:** Post 9, with a tokenizer expanded for code patterns.
+- **FIM stage:** rearrange documents, train as usual. This post.
+- **Long-context stage:** RoPE base rescaling + a small amount of long-context fine-tuning. Post 6.
+- **Specialist branches (Python, Instruct):** SFT on instruction data filtered or generated for the target distribution. Post 9.
+- **RL stage:** GRPO with executor-based rewards. Post 11 + this post.
+
+There is no new architecture in any of this. Every component is a recipe from earlier in the course, retuned for code.
+
+## Multilingual: just expand the vocabulary
+
+Now flip from one specialisation to another. Multilingual LLMs feel exotic — *how does a single model speak fifty languages?* — but the answer is, structurally, much simpler than people assume.
+
+A monolingual English LLM has a tokenizer with vocab size around 32K–50K, mostly English subwords. To make it multilingual, you do three things:
+
+1. **Expand the tokenizer.** Train BPE on a multilingual corpus instead of an English-only one. Vocab size grows — modern multilingual LLMs run 128K–256K — to absorb common subwords from many languages without forcing rare languages into one-byte-per-character tokenisation.
+2. **Train on multilingual data.** Mix the pre-training corpus with proportional samples of each target language. The model learns to predict next tokens regardless of which language they belong to. The transformer doesn't care.
+3. **(Optional) instruction-tune in multiple languages.** SFT on instruction-following data translated/generated across languages. Otherwise the base model can read all of them but defaults to answering in English.
+
+That's it. There is no "language head", no "language router", no per-language adapter. The same forward pass handles English, Spanish, Hindi, and Mandarin — the only thing that changes is which token IDs come out of the tokenizer.
+
+Why does this work? Because **meaning lives in the embedding space, not in the surface form of the token**. The model produces an internal vector representing intent ("the concept of a brown dog"), and the un-embedding picks the closest token in whichever language's slice of vocab. Spanish "perro", French "chien", and English "dog" have embeddings that are close together — closer to each other than any of them is to "elephant" — because they appear in similar contexts during training.
+
+Translation works "for free" as a consequence: if the prompt asks the model to respond in French, the early transformer layers form a French-context understanding, the late layers produce concept vectors, and the un-embedding step naturally favours French tokens because the prompt has biased the context toward them. No translation module, no separate decoder, just the same next-token loop with a different conditioning prompt.
+
+## Cross-lingual transfer is not free
+
+The "fifty-languages-one-model" story has an important caveat that the XLM-R team pinned down in 2019 and that still holds: as you add more languages to a fixed-capacity model, performance on each individual language eventually starts to *drop*. There's a transfer-interference trade-off.
+
+<Media src="/images/blog/llm-internals-12-coding-and-multilingual-llms/xlmr-fig2.png" alt="Bar chart from the XLM-R paper showing the transfer-interference trade-off. Multiple languages are grouped into low-resource (left) and high-resource (right) buckets. For each language, three bars compare validation perplexity for models trained on 7, 30, and 100 languages. Low-resource languages benefit clearly from training on more languages — perplexity drops as language count rises, showing positive cross-lingual transfer. High-resource languages show the opposite pattern: their perplexity gets worse as more languages are added, since a fixed-capacity model has to share parameters across more vocabularies and grammars." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/1911.02116">Conneau et al. 2019, "Unsupervised Cross-lingual Representation Learning at Scale" (XLM-R)</SmartLink>, Figure 2. Low-resource languages benefit from being trained alongside high-resource ones (they piggy-back on shared structure). High-resource languages get *worse* as more languages crowd the same parameter budget. The cure is to scale up model capacity faster than language count — which is exactly what frontier multilingual LLMs do.
+</Text>
+
+The practical implication: a model that wants to be excellent in one language and pretty good in fifty needs more parameters than a model that wants to be excellent in only one. Frontier multilingual LLMs (GPT-4, Gemini, Llama 3) absorb this cost by being large enough that the interference cost is dwarfed by the transfer benefit, but the trade-off doesn't disappear.
+
+## Tokenizer fairness across languages
+
+Even when a multilingual model handles fifty languages with similar quality, the *tokenizer* still treats them unequally. Subword BPE is trained on a corpus where languages appear in proportion to their training data — which means Latin-script European languages dominate. Non-Latin scripts get penalised in three compounding ways:
+
+1. The tokenizer has fewer merges for them, so common words get fragmented.
+2. Some scripts (CJK, Arabic, Devanagari) have inherently more characters per word than Latin scripts.
+3. Some languages are agglutinative (Korean, Finnish, Turkish) — single conceptual "words" are long compounds.
+
+The result is a real, measurable, per-language tax on tokens-per-word:
+
+<Media src="/images/blog/llm-internals-12-coding-and-multilingual-llms/tokens-per-language.png" alt="Bar chart titled tokens per word relative to English baseline. Languages on x-axis from left to right: English at 1.00, German 1.37, Spanish 1.55, Portuguese 1.57, French 1.60, Italian 1.64, Chinese 1.91, Japanese 2.30, Bulgarian 2.64, Arabic 3.04, Burmese 11.70. European Latin-script languages cluster between 1.0 and 1.7. CJK languages are around 2.0. Cyrillic and Arabic-script languages run 2.6 to 3.0. Burmese sits far above the rest at nearly 12 times the English token count." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Approximate tokens-per-word ratios for the GPT-4 (cl100k_base) tokenizer, relative to English = 1.0. Data adapted from <SmartLink href="https://arxiv.org/abs/2305.15425">Petrov et al. 2023, "Language Model Tokenizers Introduce Unfairness Between Languages"</SmartLink>, Table 1. Burmese, the most fragmented language in their study, costs roughly 12× more tokens per word than English.
+</Text>
+
+This isn't just an aesthetic problem. It cascades into three concrete asymmetries:
+
+- **Inference cost.** APIs price per token. A user typing Burmese pays roughly 12× what an English user pays for an equivalent message.
+- **Effective context window.** A 128K-token window that holds a whole novel in English holds barely a chapter in Burmese.
+- **Latency.** More tokens means more decode steps. The same response is materially slower.
+
+The fix is partial: train the tokenizer with explicit per-language sampling temperature (oversample under-resourced languages so they get more BPE merges) or use byte-level fallbacks. Mielke et al.'s 2021 survey is the standard reference for the trade-offs. Frontier labs increasingly do exactly this — but the asymmetry never fully closes, because some scripts genuinely encode more information per word than others.
+
+## Coming up next
+
+This post stayed inside the text-token universe — code and natural languages are still ultimately sequences of discrete tokens fed into the same transformer. The next post breaks out of that universe.
+
+**Post 13: Seeing — Vision Transformers and Diffusion Models.** Two distinct image pipelines: ViT-based *understanding* (CLIP-trained projectors that turn images into token-shaped vectors a frozen LLM can read) and diffusion-based *generation* (DDPM core, DiT, latent diffusion, Stable Diffusion). Same transformer machinery from Posts 1–6 shows up in both, but with continuous patches instead of discrete tokens.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Coding LLMs</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Bavarian et al. 2022, "Efficient Training of Language Models to Fill in the Middle" (FIM). <SmartLink href="https://arxiv.org/abs/2207.14255">arxiv.org/abs/2207.14255</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Rozière et al. 2023, "Code Llama: Open Foundation Models for Code." <SmartLink href="https://arxiv.org/abs/2308.12950">arxiv.org/abs/2308.12950</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Guo et al. 2024, "DeepSeek-Coder: When the Large Language Model Meets Programming." <SmartLink href="https://arxiv.org/abs/2401.14196">arxiv.org/abs/2401.14196</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Li et al. 2023, "StarCoder: may the source be with you!" <SmartLink href="https://arxiv.org/abs/2305.06161">arxiv.org/abs/2305.06161</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Mistral AI, "Codestral" model card. <SmartLink href="https://mistral.ai/news/codestral/">mistral.ai/news/codestral</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Multilingual LLMs</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Conneau et al. 2019, "Unsupervised Cross-lingual Representation Learning at Scale" (XLM-R). <SmartLink href="https://arxiv.org/abs/1911.02116">arxiv.org/abs/1911.02116</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Pires et al. 2019, "How multilingual is Multilingual BERT?" <SmartLink href="https://arxiv.org/abs/1906.01502">arxiv.org/abs/1906.01502</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Petrov et al. 2023, "Language Model Tokenizers Introduce Unfairness Between Languages." <SmartLink href="https://arxiv.org/abs/2305.15425">arxiv.org/abs/2305.15425</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Mielke et al. 2021, "Between Words and Characters: A Brief History of Open-Vocabulary Modeling and Tokenization in NLP." <SmartLink href="https://arxiv.org/abs/2112.10508">arxiv.org/abs/2112.10508</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Tokenization tools</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      OpenAI tokenizer playground. <SmartLink href="https://platform.openai.com/tokenizer">platform.openai.com/tokenizer</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Tiktokenizer — multi-model tokenizer comparison in your browser. <SmartLink href="https://tiktokenizer.vercel.app">tiktokenizer.vercel.app</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      OpenAI tiktoken (Python library). <SmartLink href="https://github.com/openai/tiktoken">github.com/openai/tiktoken</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>

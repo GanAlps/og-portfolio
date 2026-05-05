@@ -1,0 +1,191 @@
+---
+title: "Watching: Video & the Temporal Dimension"
+subtitle: "What changes when input has time built in — spatiotemporal patches, factorised attention, and 3D denoising"
+publishedAt: "2026-05-02"
+summary: "Part 14 of The LLM Internals Course (Part A — Video). Adding a time axis to images breaks every assumption from Post 13. We unpack how video is tokenized into spatiotemporal patches, how attention is factorised so a 1-minute clip doesn't blow up the context window, how compression strategies (uniform sampling, temporal pooling, SlowFast, Perceiver Resampler) shrink thousands of frames into a manageable token count, and how Sora-style diffusion extends the same denoising loop into a 3D block of latent noise."
+tag: "AI"
+series: "llm-internals-course"
+part: 14
+partTitle: "Watching: Video"
+images: []
+team: []
+---
+
+## The new dimension: time
+
+Post 13 dealt with images: a 224×224 picture goes into a ViT, which produces 196 patch tokens. Tidy. The model is "looking" at one frozen moment.
+
+Video breaks that tidiness in one specific way: it adds a **time axis**. A 1-minute clip at 30 fps is 1800 frames. Naively running each frame through ViT independently produces 1800 × 196 ≈ 350K visual tokens — a context window the size of a small novel for one minute of footage. And each frame in isolation discards the most informative property a video has: how things *change*.
+
+Two different problems follow from the time dimension:
+
+1. **Understanding** ("what is happening in this video, in plain English?") needs to fit thousands of frames into a context window without exploding cost or breaking attention.
+2. **Generation** ("draw a 5-second clip of a fox running through snow") needs to produce coherent motion across frames — the fox can't morph into a different fox at frame 50.
+
+This post walks each problem in turn. It assumes Post 13's image-pipeline material — ViT, projector, diffusion, VAE, DiT — and just shows what changes when time is added.
+
+## Video understanding: spatiotemporal patches
+
+Step one is the same as for images: turn raw input into a sequence of token-shaped vectors. For images the unit was a 16×16 patch. For video, the natural unit is a **3D patch** — sometimes called a "tubelet" — a small block that spans a few pixels horizontally, a few vertically, **and a few frames deep**.
+
+A typical choice: 16×16 pixels × 2 frames. Each tubelet collapses to one vector that encodes both spatial appearance ("there's a piece of fur here") and a hint of motion ("it's moving leftward between these two frames"). That's the conceptual win — *the time information is baked into the token*, not bolted on afterwards.
+
+<Media src="/images/blog/llm-internals-14-watching-video-and-temporal/vivit-tubelets.png" alt="ViViT tubelet embedding diagram. A 3D volume of video frames stacked along a depth axis labeled T, with two highlighted 3D tubelets (a yellow one and a red one) sticking out of the volume. Each tubelet spans a small spatial window in H and W, and several frames in T. Each tubelet maps to a single embedding vector x_i in the token sequence on the right." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2103.15691">Arnab et al. 2021, "ViViT: A Video Vision Transformer"</SmartLink>, Figure 3. Each "tubelet" is a 3D box of pixels-across-frames that gets linearly embedded into one token. The tokenization step is now genuinely volumetric — not "ViT applied to each frame separately".
+</Text>
+
+The arithmetic is uglier than for images. A 16-frame clip at 224×224 with 16×16×2 tubelets produces 14 × 14 × 8 = 1568 tokens (compared to 196 for a single image). For a long clip you can either pick a tubelet depth that divides the clip cleanly, or sample frames uniformly first to keep the token count tractable. We'll get to compression below.
+
+## Temporal attention
+
+Once you have spatiotemporal tokens, you can in principle just feed them through a normal transformer — every token attends to every other token, exactly like in ViT or any text model. **Don't.** Full attention is O(n²) in the number of tokens; with 1568 tokens per clip, that's 2.5M attention scores per layer per head. For a 1-minute clip with sampled frames that climbs into the billions.
+
+The standard fix is **factorised attention**: split the work into spatial and temporal passes that each touch a much smaller set of tokens.
+
+<Media src="/images/blog/llm-internals-14-watching-video-and-temporal/vivit-factorised.png" alt="ViViT factorised encoder diagram. At the bottom, video frames are embedded into tokens. Each frame's tokens go through their own Spatial Transformer Encoder (left, middle, right). The output of each spatial encoder is a single per-frame summary token (CLS-like). These summary tokens are then stacked across frames and passed through a Temporal Transformer Encoder, whose final output goes to an MLP Head that predicts the class. Two arrows show position+token embedding feeding into both stages." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2103.15691">Arnab et al. 2021, "ViViT"</SmartLink>, Figure 4 (Model 2 — Factorised Encoder). Spatial attention runs *within* each frame's tokens: cheap, parallel across frames. Temporal attention then runs across the per-frame summary tokens — also cheap, since there are only T of them. Same expressive power as full attention at a fraction of the FLOPs.
+</Text>
+
+A useful mental model: spatial attention answers *"what's in this frame?"*, temporal attention answers *"how did it change between frames?"*. Either can be done cheaply on its own; doing both at once was the expensive thing, and factorising them is the unlock.
+
+Factorisation is the same trick that lets MoE (Post 5) and chunked prefill (Post 4) scale: turn one large expensive operation into two smaller cheap ones whose composition is almost as good.
+
+## The token-count problem
+
+Even with factorised attention, a long video still produces too many tokens to fit comfortably in a context window. Three families of compression strategies handle this:
+
+1. **Uniform sampling.** The simplest move: pick one frame every N (say, 1 frame per second). For a 1-minute clip, that's 60 frames instead of 1800. Information is lost, but for many tasks (captioning, summarising) the dropped frames are largely redundant.
+2. **Temporal pooling.** Average or attention-pool adjacent frames into one summary token, instead of throwing them away. Cheap and information-preserving for slow-changing scenes; bad if the action lives in the dropped frames.
+3. **SlowFast.** Two parallel pathways look at the same video at different temporal resolutions: a *slow* pathway with high spatial detail at low frame rate (captures *what* is in the scene), and a *fast* pathway with low spatial detail at high frame rate (captures *motion*). Fuse the two streams late.
+
+<Media src="/images/blog/llm-internals-14-watching-video-and-temporal/slowfast-fig1.png" alt="SlowFast network diagram. Top pathway: a low frame rate video stream (shown as 4 wide, sparse frames) feeds into a stack of three Conv blocks at high spatial channel count C, ending in a prediction. Bottom pathway: a high frame rate video stream (shown as many tightly packed frames) feeds into a parallel stack of Conv blocks at low spatial channel count beta times C. The two pathways are connected by lateral arrows that fuse the fast pathway's motion features into the slow pathway at multiple stages, with the joint output producing the final prediction." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/1812.03982">Feichtenhofer et al. 2018, "SlowFast Networks for Video Recognition"</SmartLink>, Figure 1. Two pathways at very different temporal resolutions, fused through lateral connections. The slow path sees ~T/8 frames at high channel capacity; the fast path sees the full T frames at ~β·C channels, with β ≈ 1/8. Total compute stays modest because the fast path is so thin.
+</Text>
+
+A fourth family — the **Perceiver Resampler** — is so important that it gets its own section below.
+
+## Compression as a first-class layer: the Perceiver Resampler
+
+DeepMind's Flamingo introduced the cleanest way to compress arbitrary numbers of visual tokens into a fixed budget. The trick is to define **a small set of learned latent queries** (say, 64 vectors), and have *them* attend to the full set of visual tokens — instead of letting visual tokens attend to each other.
+
+<Media src="/images/blog/llm-internals-14-watching-video-and-temporal/flamingo-fig3.png" alt="Flamingo architecture overview diagram. Left: two image inputs (a dog photo and a cat photo) each feed into a frozen Vision Encoder, then into a Perceiver Resampler that produces a small fixed-size visual feature set. Right: the resampled visual features are interleaved with text into the LM context window via Gated XATTN-DENSE adapters between every transformer block of a frozen Language Model. The output is text generated token-by-token, like a very serious cat. A legend shows pretrained-and-frozen modules in blue with snowflake icons, and trained-from-scratch modules (Perceiver Resampler and Gated XATTN-DENSE) in pink." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2204.14198">Alayrac et al. 2022, "Flamingo"</SmartLink>, Figure 3. Every visual input — image *or* sequence of video frames — goes through a Perceiver Resampler that compresses to a fixed number of tokens. The frozen language model only ever sees that fixed budget, regardless of whether the input was 1 frame or 1000.
+</Text>
+
+Concretely:
+
+- Run all video frames through a vision encoder → produces, say, 5000 visual tokens.
+- Define 64 learnable "query" vectors. (These are model parameters, not input-dependent.)
+- Run cross-attention where the **64 queries attend to the 5000 keys/values** produced by the visual encoder. Output: 64 vectors.
+- Hand those 64 vectors to the language model as the visual prefix.
+
+The 64 vectors are a *learned summary* of the entire video. Because the queries are global parameters, they're free to specialise: one query learns to encode "the main subject", another "the dominant motion", another "scene context". You get a fixed, small, content-aware compression — exactly the thing a context window can absorb.
+
+This is the engine inside Flamingo, Video-LLaVA, and most modern video-understanding LLMs. Every clip — whether 5 seconds or 5 minutes — produces the same number of visual tokens.
+
+## Position embeddings for time: 3D-RoPE in one paragraph
+
+Post 6 covered RoPE — the rotary position encoding that gives a transformer a sense of relative position by rotating each token's Q and K vectors by an angle proportional to its position. It's straightforward to extend to 2-D (separate rotations on different vector slices for x and y) and to 3-D ((x, y, t) coordinates with three independent rotation slots). 3D-RoPE is what video-aware models use to give every token a *spatial-and-temporal* address. Mechanically: the same RoPE math from Post 6, applied independently to three vector slices instead of one — no new theory.
+
+## Sliding window for very long videos
+
+For multi-minute or hour-long video, even Perceiver Resampler-compressed contexts grow. The standard recipe: process windowed chunks (frames 1–10, then 5–15, then 10–20, with overlap), and keep a **summary KV-cache** that's passed forward between windows — analogous to chunked prefill (Post 4) but at the level of a full clip rather than a single sequence. The model effectively gets a "short-term memory" that survives across windows. For real-time live-stream processing, the same machinery works as a sliding window over the live frame buffer.
+
+## Video generation: 3D denoising
+
+Now flip from understanding to generation. The diffusion machinery from Post 13 — forward noising, reverse denoising, DiT, latent diffusion — extends to video almost mechanically. The only thing that changes is the *shape* of what's being denoised.
+
+For images, the latent was a 2D grid (e.g. 64×64×4). For video, the latent is a **3D block** — frames × H × W × channels. The forward process adds Gaussian noise to the entire 3D block; the reverse process predicts and removes that noise across the full block in one pass. Same loss, same DDIM samplers, same DiT block — just applied to a volumetric latent.
+
+<Media src="/images/blog/llm-internals-14-watching-video-and-temporal/sora-overview.png" alt="Sora framework overview from a community Sora review paper. Three labelled regions, left to right. (1) Pixel Video Space: input video x in real-numbers H by W by T by d feeds into an Encoder; on the bottom row, a clean reconstruction x-tilde comes out of a Decoder. (2) Compact Latent Space (the green box): the encoded clean latent Z_0 in a smaller H' x W' x T' x d space. A Diffusion Process arrow labelled Adding Gaussian Noise produces a Noisy Latent Z_t. The Diffusion Transformer denoises the noisy latent patch back toward Z_0 by iterating x (T-1) times, also marked Patchify which converts the spatiotemporal latent into patch tokens for the transformer. (3) Conditioning: GPT-4 augments the user's text prompt; CLIP encodes images or video frames; both feed in as condition c that the Diffusion Transformer attends to during denoising." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2402.17177">Liu et al. 2024, "Sora: A Review on Background, Technology, Limitations, and Opportunities of Large Vision Models"</SmartLink>, Figure 4. Reverse-engineered Sora architecture. Notice it's the same three-stage pattern as Stable Diffusion (Post 13): pixel space → VAE-compressed latent → diffusion in latent → decode back to pixels. The diffusion happens in a *4D* latent (H × W × T × d), and the conditioning signal includes a GPT-4-augmented prompt rather than raw user text.
+</Text>
+
+The hard part is **temporal consistency**. If the model denoises frame 50 independently of frame 49, the cat in frame 50 has a fair chance of subtly morphing — different fur length, slightly different pose. The DiT's attention layers handle this: a token at (x, y, frame 50) attends to tokens at (x, y, frame 49) and (x, y, frame 51), so its features stay consistent with neighbouring frames in time. Identity persistence falls out of attention naturally — *if you give it 3D positional information and let it attend across the full 3D block*.
+
+## The "physics" of video models
+
+A subtle and easily over-claimed property of well-trained video diffusion models: they appear to learn a rough **visual physics** from data. There's no hardcoded gravity, friction, or rigid-body dynamics; just billions of frames of video showing balls falling, water splashing, fabric folding. The model's next-noise prediction implicitly captures the prior "given this frame, the most likely next frame is one where the ball has accelerated downward". String enough such predictions together and you get something that *looks* like physics-aware generation.
+
+This isn't a world model in the strong sense — it's a frame-to-frame prior — but it's the reason Sora-style models can produce minute-long clips with object permanence and ballistic trajectories that mostly hold up. The phrase "world simulator" is overselling it; "very good frame-to-frame prior" is closer.
+
+## Understanding vs generation: the cleanest split
+
+To pin the two pipelines side by side:
+
+<Table
+  data={{
+    headers: [
+      { content: "Aspect", sortable: false },
+      { content: "Video Understanding (e.g. Video-LLaVA)", sortable: false },
+      { content: "Video Generation (e.g. Sora)", sortable: false },
+    ],
+    rows: [
+      ["Goal", "Extract meaning / narrative from video", "Create realistic frames from text"],
+      ["Input", "Video frames + text query", "Text prompt + 3D random noise"],
+      ["Output", "Textual description / answer", "Sequence of video frames"],
+      ["Front-end", "ViT / spatiotemporal encoder + projector", "VAE encoder (latent compression)"],
+      ["Core model", "Frozen LLM with cross-attention to visual tokens", "Diffusion Transformer (DiT) with 3D attention"],
+      ["Hard problem", "Token-redundancy, fitting clip in context", "Temporal coherence — no glitching across frames"],
+    ],
+  }}
+/>
+
+Notice both halves *re-use everything from the rest of this course*: ViT and CLIP from Post 13, projectors and LoRA fine-tuning from Posts 9–10–13, latent diffusion and DiT from Post 13. The only genuinely new ideas are spatiotemporal patches and the compression tricks that get long clips into a fixed budget.
+
+## Coming up next
+
+This post handled half of "the temporal dimension" — video frames stacked across time. The other half is sound, which has its own time axis (waveforms at 16–44 kHz) and its own tokenization story.
+
+**Post 15: Hearing — Audio and Audio-Video Sync.** Three approaches to audio tokenization (spectrograms, neural codecs, native), how GPT-4o-style models keep voice and pixels aligned, why CLAP-pretrained encoders bind sounds to text the same way CLIP binds images, and how Sora-style joint diffusion generates pixels and sound from the same latent.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Video understanding</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Arnab et al. 2021, "ViViT: A Video Vision Transformer." <SmartLink href="https://arxiv.org/abs/2103.15691">arxiv.org/abs/2103.15691</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Bertasius et al. 2021, "Is Space-Time Attention All You Need for Video Understanding?" (TimeSformer). <SmartLink href="https://arxiv.org/abs/2102.05095">arxiv.org/abs/2102.05095</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Feichtenhofer et al. 2018, "SlowFast Networks for Video Recognition." <SmartLink href="https://arxiv.org/abs/1812.03982">arxiv.org/abs/1812.03982</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lin et al. 2023, "Video-LLaVA: Learning United Visual Representation by Alignment Before Projection." <SmartLink href="https://arxiv.org/abs/2311.10122">arxiv.org/abs/2311.10122</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Alayrac et al. 2022, "Flamingo: a Visual Language Model for Few-Shot Learning" (Perceiver Resampler). <SmartLink href="https://arxiv.org/abs/2204.14198">arxiv.org/abs/2204.14198</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Video generation</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      OpenAI 2024, "Video generation models as world simulators" (Sora technical report). <SmartLink href="https://openai.com/index/video-generation-models-as-world-simulators/">openai.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Liu et al. 2024, "Sora: A Review on Background, Technology, Limitations, and Opportunities." <SmartLink href="https://arxiv.org/abs/2402.17177">arxiv.org/abs/2402.17177</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Blattmann et al. 2023, "Stable Video Diffusion." <SmartLink href="https://arxiv.org/abs/2311.15127">arxiv.org/abs/2311.15127</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Visual explainers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Towards Data Science, "Explaining OpenAI Sora's Spacetime Patches." <SmartLink href="https://towardsdatascience.com/explaining-openai-soras-spacetime-patches-the-key-ingredient-e14e0703ec5b/">towardsdatascience.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lilian Weng, "Diffusion Video Models." <SmartLink href="https://lilianweng.github.io/">lilianweng.github.io</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>

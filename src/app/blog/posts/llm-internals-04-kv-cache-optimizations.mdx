@@ -1,7 +1,7 @@
 ---
 title: "KV Cache Optimizations: PagedAttention, MQA / GQA, FlashAttention & Batching"
 subtitle: "The set of tricks that turned LLM serving from a research demo into a real business"
-publishedAt: "2026-05-29"
+publishedAt: "2026-04-22"
 summary: "Part 4 of The LLM Internals Course. The KV cache is the single biggest constraint on LLM serving — it grows linearly with tokens and quadratically with batch size, and it's why a GPU runs out of memory before it runs out of compute. We unpack the architectural fixes (MQA, GQA), the engineering fixes (PagedAttention, FlashAttention, continuous batching, chunked prefill, prefix caching), and a brief tour of quantization — then see how vLLM stacks them together."
 tag: "AI"
 series: "llm-internals-course"

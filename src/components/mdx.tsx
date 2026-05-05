@@ -290,6 +290,7 @@ const components = {
   SmartLink,
   TokenizerDemo,
   FurtherReading,
+  Mermaid,
 };
 
 type CustomMDXProps = MDXRemoteProps & {

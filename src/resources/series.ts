@@ -18,11 +18,11 @@ export const llmInternalsCourse: Series = {
   title: "The LLM Internals Course",
   tagline: "A visual, theoretical course on how modern LLMs are served, trained, and made multi-modal.",
   intro: [
-    "This is a 15-post course adapted from my own learning notes on Generative AI. The goal is straightforward: by the end of it, you understand how LLMs actually work end-to-end — inference, training, and multi-modal — the same way I came to understand them.",
+    "This is a 16-post course adapted from my own learning notes on Generative AI. The goal is straightforward: by the end of it, you understand how LLMs actually work end-to-end — inference, training, and multi-modal — the same way I came to understand them.",
     "It's written for engineers who already have a passing acquaintance with neural networks and transformers. No prior production-LLM experience required, but you should be comfortable with the words \"gradient,\" \"softmax,\" and \"attention\" before Post 1.",
     "Posts are heavy on diagrams and source images, with all the relevant equations rendered inline. Read in order: each part assumes the one before it.",
   ],
-  totalPosts: 15,
+  totalPosts: 16,
   parts: [
     {
       label: "Part 1 — Inference",
@@ -40,7 +40,7 @@ export const llmInternalsCourse: Series = {
       label: "Part 3 — Multi-Modal",
       description:
         "How LLMs grow beyond text: code, languages, vision, diffusion, audio, video, and unified any-to-any generation.",
-      partRange: [12, 15],
+      partRange: [12, 16],
     },
   ],
 };

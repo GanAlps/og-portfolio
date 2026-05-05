@@ -11,8 +11,10 @@ import {
   Meta,
 } from "@once-ui-system/core";
 import { home, about, person, baseURL, routes } from "@/resources";
+import { llmInternalsCourse } from "@/resources/series";
 import { Projects } from "@/components/work/Projects";
 import { Posts } from "@/components/blog/Posts";
+import { SeriesCard } from "@/components/blog/SeriesCard";
 
 export async function generateMetadata() {
   return Meta.generate({
@@ -80,6 +82,13 @@ export default function Home() {
       <RevealFx translateY="16" delay={0.6}>
         <Projects range={[1, 1]} />
       </RevealFx>
+      {routes["/blog"] && (
+        <RevealFx translateY="16" delay={0.7} fillWidth>
+          <Column maxWidth="m" paddingX="20">
+            <SeriesCard series={llmInternalsCourse} />
+          </Column>
+        </RevealFx>
+      )}
       {routes["/blog"] && (
         <Column fillWidth gap="24" marginBottom="l">
           <Row fillWidth paddingRight="64">
