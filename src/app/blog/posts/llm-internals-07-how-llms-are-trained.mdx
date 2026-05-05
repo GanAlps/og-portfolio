@@ -1,7 +1,7 @@
 ---
 title: "How LLMs Are Actually Trained"
 subtitle: "Self-supervision, the cross-entropy loss, AdamW, and why training a 70B model needs 16× its weight in memory"
-publishedAt: "2026-06-19"
+publishedAt: "2026-04-25"
 summary: "Part 7 of The LLM Internals Course. Pre-training is conceptually simple — predict the next token — but the engineering reality is dense. We trace one training step end-to-end: where the labels come from, the cross-entropy loss, why a plain SGD update is unstable at LLM scale, what AdamW actually tracks, and the three memory tricks (gradient checkpointing, FlashAttention, mixed precision) that make the whole thing fit on a GPU."
 tag: "AI"
 series: "llm-internals-course"

@@ -1,0 +1,199 @@
+---
+title: "Hearing: Audio & Audio-Video Sync"
+subtitle: "Three ways to tokenize sound, and three ways to keep it locked to pixels"
+publishedAt: "2026-05-03"
+summary: "Part 15 of The LLM Internals Course (Part B — Audio). Audio is a continuous waveform at 16–44 kHz, which is too dense to feed into a transformer raw. We unpack the three approaches that get audio into LLMs — spectrograms (Whisper), neural codecs (EnCodec, AudioLM), and native end-to-end (GPT-4o style) — and the three ways modern systems keep audio and video in sync (token interleaving, cross-modal attention, contrastive alignment like CLAP)."
+tag: "AI"
+series: "llm-internals-course"
+part: 15
+partTitle: "Hearing: Audio"
+images: []
+team: []
+---
+
+## The audio problem
+
+Sound is a continuous one-dimensional signal: air-pressure samples at 16,000 to 44,100 numbers per second. A 30-second utterance is roughly 480,000 to 1,323,000 raw samples. Feeding that directly into a transformer is hopeless — the sequence length is enormous and consecutive samples carry almost no independent information (most of the meaningful structure lives in the *frequency* domain, not the time-domain samples).
+
+Every audio LLM pipeline solves this with one of three strategies. They differ in what they tokenize, how lossy that tokenization is, and what the model can do with the result. We'll walk all three, then connect audio back to video for sync.
+
+## Approach 1: spectrograms
+
+The first approach treats audio as an *image*: convert the waveform to a 2D representation (time on the X axis, frequency on the Y axis), then run it through the same vision pipeline from Post 13 — patchify, embed, transformer, projector to LLM. Whisper is the canonical example.
+
+The Mel-spectrogram is the standard audio-as-image representation: take overlapping windows of the waveform, apply a Fourier transform to each, group the resulting frequency bins onto the Mel scale (which compresses high frequencies the way human hearing does), and stack the time-windows side by side. The result is a 2D matrix that *looks* like a sideways heatmap — and behaves enough like an image that a ViT-style encoder can process it directly.
+
+<Media src="/images/blog/llm-internals-15-hearing-audio-and-sync/whisper-fig1.png" alt="Whisper architecture overview from Radford 2022. Left: Multitask training data, 680k hours, with examples of English transcription, any-to-English speech translation, non-English transcription, and no-speech (background music). Right: Sequence-to-sequence learning pipeline. The audio waveform is converted to a Mel-spectrogram (visible at the bottom as a heatmap of frequency vs time), passed through 2 1D convolutions plus GELU and sinusoidal positional encoding, then through a stack of Transformer Encoder Blocks (each with self-attention and MLP). The encoder output feeds a Transformer Decoder via cross-attention. The decoder also receives task tokens (EN, TRANSCRIBE, 0.0) plus learned positional encoding and produces the transcription token by token: The quick brown ..." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2212.04356">Radford et al. 2022, "Robust Speech Recognition via Large-Scale Weak Supervision" (Whisper)</SmartLink>, Figure 1. The Mel-spectrogram (heatmap, bottom) is the audio's sole representation. Everything from there is the standard encoder-decoder transformer, just with audio-shaped inputs.
+</Text>
+
+**Pros.** Robust, well-understood, leverages decades of computer-vision tooling. Whisper trained on 680K hours of audio and achieves human-level accuracy on diverse speech-to-text tasks.
+
+**Cons.** Spectrograms are *lossy by design*. The phase information of the waveform is discarded; the Mel binning throws away high-frequency detail; the windowing limits temporal resolution. This is fine for transcription (where you only need to recover the words) but bad for *generation* — try to invert a Mel-spectrogram back to audio and you get a buzzy, robotic-sounding waveform. Spectrograms can't capture timbre, emotion, or expressive prosody well enough to *produce* convincing speech.
+
+That's why every speech-to-text system you've used in the last decade is probably some flavour of spectrogram-based, and every text-to-speech system that sounds genuinely human (ElevenLabs, GPT-4o voice, Gemini Live) is using something else.
+
+## Approach 2: neural audio codecs
+
+The second approach is to learn a *discrete* token vocabulary for audio, the same way text tokenization gives you a discrete vocabulary for words. The architecture that does this is called a **neural audio codec** — most famously SoundStream and EnCodec.
+
+A neural codec is a CNN-based autoencoder with a quantization layer in the middle:
+
+<Media src="/images/blog/llm-internals-15-hearing-audio-and-sync/encodec-fig1.png" alt="EnCodec architecture from Defossez 2022. Left: a raw audio waveform feeds into an Encoder consisting of a Conv1D layer plus several Conv blocks and a final Conv1D, producing a low-dimensional continuous latent. Center: the latent passes through a Quantizer made of four stacked vector quantization layers (residual vector quantizer, RVQ) producing discrete codes; an LSTM-style transformer module sits next to the quantizer for entropy coding. Right: the discrete codes feed into a symmetric Decoder (Conv1D + Conv blocks + Conv1D) that reconstructs the waveform. A separate Discriminator (top right, multi-scale STFT-based 6 Conv2D blocks) provides adversarial loss l_d and l_g; reconstruction losses l_w (wave) and l_s (spectrogram) are computed between input and output." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2210.13438">Défossez et al. 2022, "EnCodec: High Fidelity Neural Audio Compression"</SmartLink>, Figure 1. Encoder compresses the waveform into a latent; Residual Vector Quantization (RVQ) discretises that latent into a hierarchy of codebook indices; Decoder reconstructs the waveform from those indices. End-to-end trained with reconstruction loss + an adversarial discriminator that catches subtle artefacts the L2 loss would miss.
+</Text>
+
+The clever bit is **Residual Vector Quantization (RVQ)** — the multi-scale tokens. Instead of mapping the latent to one big codebook (which would need millions of entries to cover audio's range), RVQ uses a *cascade* of smaller codebooks. Codebook 1 picks the closest code; codebook 2 picks the closest code to the *residual* (what's left after subtracting codebook 1's choice); codebook 3 quantises the residual after codebook 2; and so on. Eight codebooks of 1024 entries each gives you 1024⁸ effective combinations.
+
+The resulting tokens have a useful natural hierarchy:
+
+<Media src="/images/blog/llm-internals-15-hearing-audio-and-sync/audiolm-fig1.png" alt="AudioLM tokenizer overview from Borsos 2022. A waveform at the bottom is processed by two parallel paths. Left path (SoundStream): a CNN Encoder feeds a Residual Vector Quantizer (RVQ); the RVQ output produces Acoustic tokens and feeds a Decoder that can reconstruct the original audio. Right path (w2v-BERT): a self-supervised speech model whose Intermediate Layer feature representations are run through k-means clustering to produce Semantic tokens. Acoustic tokens at the top capture fine timbre and prosody for high-quality reconstruction; semantic tokens at the top capture phonetic and linguistic content for long-term structural coherence." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2209.03143">Borsos et al. 2022, "AudioLM"</SmartLink>, Figure 1. Two complementary tokenizers: low-level "acoustic" tokens for high-fidelity reconstruction, high-level "semantic" tokens for linguistic coherence. AudioLM predicts semantic tokens first to plan what's being said, then conditions on those to predict acoustic tokens for *how* it sounds.
+</Text>
+
+- **Coarse (semantic) tokens** capture phonemes, words, the linguistic content — the *what*.
+- **Fine (acoustic) tokens** capture timbre, breath, room reverb, emotion — the *how*.
+
+A model trained on these tokens can be a normal next-token transformer; the only difference from a text LLM is the vocabulary. This is the architecture behind AudioLM, MusicLM, Gemini's audio path, and the audio side of GPT-4o.
+
+**Why this beats spectrograms.** Two reasons. First, the codec's decoder can reconstruct the original waveform with very high fidelity, so the model can *generate* audio that sounds genuinely human — emotion and rhythm survive the round trip. Second, since audio is now just another token stream, you can interleave it with text tokens in the same transformer, which is the foundation of any-to-any models like GPT-4o.
+
+## Approach 3: native end-to-end (the GPT-4o pattern)
+
+The third approach is, structurally, just *Approach 2 fully integrated with the language model* — but it's worth treating separately because of what it unlocks.
+
+In a "native" multimodal model:
+
+1. The user's speech enters via a neural codec encoder, producing audio tokens.
+2. Those audio tokens are concatenated with text tokens in the *same* transformer's context.
+3. The same transformer attends across both, then *predicts the next audio (or text) token* for the response.
+4. Predicted audio tokens are decoded back to a waveform via the codec's decoder (the "vocoder" stage).
+
+The key property: **the audio and text tokens live in the same transformer**. This is qualitatively different from a system that pipelines speech-to-text → text-LLM → text-to-speech. In a pipelined system, the model thinks in text — emotion in the input is lost at the speech-to-text stage, and emotion in the output is invented at the text-to-speech stage by a different model that didn't hear the input.
+
+In a native model, the input audio tokens carry emotional and prosodic information all the way through. When the user says something with frustration, the model's internal representation reflects that, and the predicted output tokens can mirror or respond to it appropriately. The "Omni" models work because their understanding of "sad" includes the *sound* of sad, not just the word.
+
+There's a quality consequence too: audio tokens are *generated*, just like text tokens, so audio quality benefits from all the techniques covered earlier in this course (RLHF for preference, FIM-style training for natural stops, KV-cache for streaming) without modification.
+
+## Comparison: which approach when
+
+The three approaches map cleanly to use cases:
+
+<Table
+  data={{
+    headers: [
+      { content: "Method", sortable: false },
+      { content: "Input format", sortable: false },
+      { content: "Main benefit", sortable: false },
+      { content: "Examples", sortable: false },
+    ],
+    rows: [
+      ["Spectrogram", "2D image (Mel-spec)", "Simple, leverages vision pipelines", "Whisper, SeamlessM4T"],
+      ["Discrete tokens (codec)", "Sequence of token IDs", "Interleavable with text, unified logic", "AudioLM, MusicLM, Chameleon"],
+      ["Native end-to-end", "Codec tokens, same transformer as text", "Highest quality, captures emotion + rhythm", "GPT-4o, Gemini Live"],
+    ],
+  }}
+/>
+
+If you only need transcription, spectrograms are good enough and have decades of tooling. If you need to generate convincing speech, you need codec tokens. If you need conversational naturalness — interrupting, mirroring tone, emotion-aware response — you need native end-to-end.
+
+## Audio + video sync, three ways
+
+Modern multimodal models almost always combine audio with images or video. There are three architectural patterns for keeping them aligned, in increasing order of integration:
+
+### 1. Fused sequence (early fusion)
+
+The cleanest design: tokenize each modality separately, then **interleave the tokens by timestamp** into a single sequence the transformer attends over. A 1-second clip with audio + video becomes:
+
+```
+[frame-1 visual tokens] [audio tokens 0–1s] [frame-2 visual tokens] [audio tokens 1–2s] ...
+```
+
+Self-attention does the rest. When the model sees a "visual token of glass shattering" right next to an "audio token of crashing", repeated across millions of training examples, it learns the correlation directly without any explicit cross-modal mechanism. This is the GPT-4o / Gemini design.
+
+### 2. Cross-modal attention (late fusion)
+
+For systems that need to *understand* video and audio but not generate them, separate encoders are common: a Whisper-style audio encoder produces audio tokens, a ViT-style video encoder produces video tokens, and a fusion transformer uses **cross-attention** with one modality as queries and the other as keys/values.
+
+The classic application: a person speaking in a noisy room. The model sees the visual tokens of the person's moving lips; those queries attend over the audio tokens; the attention naturally focuses on frequencies belonging to *that person's voice*, filtering out crowd noise. This is how late-fusion video understanding models suppress background distractions — they let the visual stream guide what the audio attention "listens" to.
+
+### 3. Contrastive alignment (CLAP)
+
+Before either of the above can work well, you typically want the audio and visual encoders to produce vectors that *mean the same thing across modalities*. CLAP — Contrastive Language-Audio Pretraining — is the audio analogue of CLIP from Post 13.
+
+<Media src="/images/blog/llm-internals-15-hearing-audio-and-sync/clap-fig1.png" alt="LAION-CLAP architecture from Wu 2022. Left: audio waveforms (one short, one long with downsampling) feed into Mel-FilterBank then Conv2D layers, with Attention Feature Fusion combining short and long-clip representations into an Audio Encoder + MLP layer that outputs audio embeddings E^a_1 to E^a_n. Right: Captions plus class labels passed through Keyword-to-Caption Augmentation feed into a Text Encoder + MLP layer that outputs text embeddings E^t_1 to E^t_n. The audio and text embeddings meet in an N-by-N similarity matrix where diagonal entries (matching audio-caption pairs) are highlighted with 1s and the contrastive loss pushes them high while pushing off-diagonal entries low." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2211.06687">Wu et al. 2022, "Large-scale Contrastive Language-Audio Pretraining (CLAP)"</SmartLink>, Figure 1. Same contrastive loss as CLIP — only the modality on the audio side has changed. After CLAP training, the embedding for the sound of barking lands close to the text embedding for "dog", far from "car". Multimodal models that combine vision-CLIP + audio-CLAP get cross-modality alignment "for free" — barking sounds, dog images, and the word "dog" all collapse to nearby points.
+</Text>
+
+The result: a multimodal LLM doesn't have to *learn* that a barking sound and a dog image go together — the encoders' outputs are already aligned in feature space. ImageBind extends this to six modalities (image, text, audio, depth, thermal, IMU) bound to the same shared space.
+
+## The Sora way: joint latent diffusion
+
+Generative multimodal systems take this further. In Sora-style joint diffusion, audio and video are predicted *simultaneously* from a shared latent diffusion process — not generated separately and stitched together. The denoiser predicts the joint distribution of pixels-and-soundwaves; the temporal attention layers ensure that the intensity of falling-water pixels correlates with the amplitude of white-noise audio tokens at the right timestamps.
+
+This is conceptually identical to the 3D denoising in Post 14 — only the latent is a *4-D block* now (frames × H × W × audio-channels), and the DiT denoises the whole thing in one pass. The hard part isn't a new algorithm; it's getting enough aligned audio-video training data and enough compute to denoise a latent that fat.
+
+## The two hard problems
+
+However the integration is done, two persistent problems show up:
+
+### Alignment drift
+
+If audio tokens accumulate at a slightly different rate than video tokens — even by a few milliseconds per second — lips desynchronise from voice over the course of a clip. The fix is **shared temporal positional embeddings**: anchor both audio and video tokens to a master clock (e.g. milliseconds-since-clip-start), so the model always knows *when* each token belongs even if it isn't sure *which* modality. The 3D-RoPE / temporal-RoPE machinery from Post 14 does the work; the only requirement is that you assign tokens absolute timestamps when you build the training corpus.
+
+### Redundancy
+
+Video tokens vastly outnumber audio tokens — a 10-second clip might have 5000 visual tokens but only 500 audio tokens after codec compression. In a single attention block, the audio tokens get *drowned out*: the loss-weighted contribution of any single audio token is dwarfed by the chorus of visual ones. Common fixes are aggressive pooling/Perceiver-Resampling on the visual side (Post 14's compression tricks), or simply re-weighting the cross-modal attention so audio gets a louder voice. There's no one perfect answer; modern systems mostly ship some heuristic and tune.
+
+## Coming up next
+
+Two posts on multimodal text-and-pixels-and-sound have laid out the components: ViT, diffusion (Post 13), spatiotemporal patches and Sora (Post 14), neural codecs and CLAP (this post). The final post pulls everything together.
+
+**Post 16: Native Multimodality and Any-to-Any Generation.** How models like Chameleon, GPT-4o, and Gemini unify all modalities into a single transformer with one shared vocabulary and one shared loss — and what it takes to generate text, images, and audio interchangeably from any combination of inputs. The capstone of Part 3.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Audio understanding & generation</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Radford et al. 2022, "Robust Speech Recognition via Large-Scale Weak Supervision" (Whisper). <SmartLink href="https://arxiv.org/abs/2212.04356">arxiv.org/abs/2212.04356</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Défossez et al. 2022, "High Fidelity Neural Audio Compression" (EnCodec). <SmartLink href="https://arxiv.org/abs/2210.13438">arxiv.org/abs/2210.13438</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Zeghidour et al. 2021, "SoundStream: An End-to-End Neural Audio Codec." <SmartLink href="https://arxiv.org/abs/2107.03312">arxiv.org/abs/2107.03312</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Borsos et al. 2022, "AudioLM: a Language Modeling Approach to Audio Generation." <SmartLink href="https://arxiv.org/abs/2209.03143">arxiv.org/abs/2209.03143</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Agostinelli et al. 2023, "MusicLM: Generating Music From Text." <SmartLink href="https://arxiv.org/abs/2301.11325">arxiv.org/abs/2301.11325</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Audio-video alignment</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Wu et al. 2022, "Large-scale Contrastive Language-Audio Pretraining (CLAP)." <SmartLink href="https://arxiv.org/abs/2211.06687">arxiv.org/abs/2211.06687</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Girdhar et al. 2023, "ImageBind: One Embedding Space To Bind Them All." <SmartLink href="https://arxiv.org/abs/2305.05665">arxiv.org/abs/2305.05665</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Visual explainers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face, "Speech-to-Text with Whisper." <SmartLink href="https://huggingface.co/blog/asr-chunking">huggingface.co/blog/asr-chunking</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lilian Weng, "The Multi-Modal LLM Landscape." <SmartLink href="https://lilianweng.github.io/">lilianweng.github.io</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>

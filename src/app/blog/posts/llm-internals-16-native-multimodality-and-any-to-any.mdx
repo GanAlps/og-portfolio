@@ -1,0 +1,241 @@
+---
+title: "Native Multimodality & Any-to-Any Generation"
+subtitle: "When the same transformer reads images, hears audio, and replies in any of them"
+publishedAt: "2026-05-04"
+summary: "Part 16, the final post of The LLM Internals Course. Earlier multimodal systems glued separate models together. Native multimodal models — Chameleon, GPT-4o, Gemini — do it inside one transformer with a unified token vocabulary. We unpack the two architectural philosophies (VQ-VAE discrete tokens vs hybrid continuous latent), the modality-switch tokens that gate output, the streaming loops that make real-time video calls work, and close the course with a synthesis of everything we covered."
+tag: "AI"
+series: "llm-internals-course"
+part: 16
+partTitle: "Native & Any-to-Any"
+images: []
+team: []
+---
+
+## The pre-2024 stack vs the 2025+ stack
+
+The multimodal systems we covered in Posts 13–15 were, mostly, *orchestrated* — separate models stitched together by a controller. A typical pre-2024 "multimodal" assistant looked like:
+
+- **Whisper** (Post 15) for speech-to-text on the way in.
+- **CLIP-trained ViT + projector** (Post 13) so a frozen LLM could see images.
+- **A text-only LLM** (Posts 1–11) for reasoning.
+- **Stable Diffusion** (Post 13) bolted on for image output.
+- **A text-to-speech model** (e.g. ElevenLabs) for voice output.
+- A small orchestrator that decided which model to call when.
+
+It worked. But every hop between models was a **lossy interface** — emotion in the user's voice was discarded at the speech-to-text stage; the image's spatial layout was compressed to a few hundred projected tokens; nuance from the LLM's reasoning got transliterated into text-to-speech that didn't know what tone to use.
+
+The 2025+ stack collapses all of that into **one transformer** with a single, unified token vocabulary. Text tokens, image tokens, audio tokens, and special "modality switch" tokens all live in the same embedding table. The same forward pass produces them. There are still encoders and decoders at the I/O boundary, but in between, every modality is just *tokens*, and the transformer's reasoning happens uniformly across all of them.
+
+This is what people mean by **native multimodality**. It's the architectural shift the rest of this post unpacks. Frontier instances as of 2026 are **Chameleon** (Meta — open weights, the cleanest pedagogical example), **GPT-4o** (OpenAI), and **Gemini** (Google DeepMind). The two open architectural philosophies are best illustrated by Chameleon vs GPT-4o, so we'll walk both.
+
+## Approach 1: VQ-VAE discrete tokens (Chameleon)
+
+Meta's Chameleon takes the most direct route: **invent a discrete vocabulary for images, the same way BPE invented one for text, and treat both vocabularies as a single token space.**
+
+The image vocabulary is built by a **VQ-VAE** — a Vector-Quantised Variational Autoencoder. We met VAE briefly in Post 13's latent diffusion section as a continuous compressor; VQ-VAE is its discretised cousin. The compression part is the same; the difference is that the latent gets *snapped* to one of K codebook vectors before going downstream.
+
+<Media src="/images/blog/llm-internals-16-native-multimodality-and-any-to-any/vqvae-fig1.png" alt="VQ-VAE architecture from van den Oord 2017. Left side: an input image x of a cocker spaniel passes through a CNN Encoder producing a continuous spatial latent grid z_e(x) of dimension D. The grid is then mapped element-wise to a discrete latent map q(z|x) by snapping each spatial cell to its nearest entry in a Codebook (Embedding Space) of K vectors e_1, e_2, e_3, ..., e_K shown at the top. The discrete code grid feeds into a CNN Decoder that reconstructs the image as p(x|z_q). A red arrow nabla_z L flows the gradient back to the encoder via the straight-through estimator. Right side: a 2-D scatter plot showing how each continuous encoder output z_e(x) is snapped to its nearest codebook entry e_2, with the gradient nabla_z L pointing back toward the encoder." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/1711.00937">van den Oord et al. 2017, "Neural Discrete Representation Learning" (VQ-VAE)</SmartLink>, Figure 1. Encoder produces a continuous latent; each spatial cell is snapped to its nearest codebook vector; decoder reconstructs from the snapped grid. The codebook *is* the visual vocabulary — typically 8K–16K entries, each a learned vector that some patch of natural images maps to.
+</Text>
+
+Once the VQ-VAE is trained, the codebook becomes a fixed image vocabulary. An image is "tokenized" by:
+
+1. Run it through the VQ-VAE encoder → get a small grid of continuous latents (e.g. 32×32).
+2. For each grid cell, find the nearest codebook entry → get a 32×32 grid of integer codebook IDs.
+3. Flatten to a sequence of 1024 integer "image tokens".
+
+The transformer's vocabulary is then `text_vocab ∪ image_vocab`. Chameleon-7B uses ~65K text tokens (BPE, like Llama 2) plus 8K image tokens — total vocab ~73K. Both kinds of token live in the same embedding table; the same `lm_head` predicts logits over both.
+
+<Media src="/images/blog/llm-internals-16-native-multimodality-and-any-to-any/chameleon-fig1.png" alt="Chameleon mixed-modal model overview from Meta 2024. Left panel labelled (a) Mixed-Modal Pre-Training: a TEXT PROMPT (What can I bake with this?) is embedded as green text tokens, and an IMAGE PROMPT (a photo of bananas, eggs, and flour) goes through an Image Tokenizer which converts it to blue image tokens framed by Start Image and End Image markers. The combined sequence flows up into the Mixed-Modal Auto-Regressive LM, which is trained to predict the next token — text or image — at every position. Right panel labelled (b) Mixed-Modal Generation: at inference, an interleaved input sequence (with End Image and Start Image markers) is processed by the Mixed Modal Auto-Regressive LM, which auto-regressively predicts a mix of text tokens (which become the TEXT OUTPUT 'Here is a recipe for banana bread') and image tokens (which feed into an Image De-Tokenizer to produce the IMAGE OUTPUT — a photo of sliced banana bread)." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2405.09818">Meta AI 2024, "Chameleon: Mixed-Modal Early-Fusion Foundation Models"</SmartLink>, Figure 1. Same auto-regressive transformer for training (left) and inference (right). The only multimodal-specific machinery is the image (de-)tokenizer at the I/O boundary; everything between is a vanilla decoder-only transformer doing next-token prediction over a unified vocabulary.
+</Text>
+
+Training is uneventful: pre-train on the same auto-regressive next-token objective from Post 7, just with documents that interleave text spans and image-token spans. The model learns whatever the joint distribution of text and image tokens turns out to be — which is a lot, because the unified loss penalises predictions of either modality with the same cross-entropy.
+
+The strength of this approach is **inter-modality reasoning**. Because images and text live in the same context window, the model can reason fluidly across them: "look at the third bullet of this slide, find the chart it references, summarise the trend". Chameleon's text-image reasoning benchmarks beat strictly-pipelined systems even with weaker raw image quality.
+
+The weakness is **image quality**. VQ-VAE introduces a quantisation bottleneck — the snap-to-codebook step throws away the fine-grained continuous detail that diffusion models preserve. Even with a large codebook, generated images from a discrete-token model look crisper-but-blander than diffusion outputs.
+
+## Approach 2: hybrid continuous latent (GPT-4o, Gemini)
+
+GPT-4o and Gemini take the alternative path. They keep the unified-transformer story, but **don't quantise images to a discrete vocabulary**. Instead the transformer emits *continuous latent vectors* at the image-output positions, and a separate **Latent Diffusion Decoder** (Post 13) turns those latents into pixels.
+
+Conceptually:
+
+- Image input: tile the image, encode each tile to a fixed-size sequence of continuous embeddings, prepend to the LLM context.
+  - GPT-4o reportedly: a low-res view as one tile (~85 tokens), plus a high-res view broken into 4×4 = 16 tiles of 170 tokens each.
+- Image output: the transformer emits continuous latent vectors at output positions, and a downstream Latent Diffusion Decoder denoises from those latents into pixels.
+
+The key compromise: the transformer still does the heavy reasoning over a unified token-shaped sequence, but the *final pixel synthesis* is delegated to diffusion machinery (Post 13) that can produce higher-fidelity output than VQ-VAE decoding. You get diffusion's image quality without losing the unified-context property — at the cost of a more complex stack and a separate decoder model that has to be trained alongside.
+
+The same trick applies to audio output: the transformer emits continuous audio latents, and a neural codec decoder (Post 15's Approach 2/3) synthesises the waveform.
+
+OpenAI hasn't published the exact architecture, so the GPT-4o description is a community reconstruction. Google's Gemini reports use enough detail to confirm a similar broad shape.
+
+## Comparing the two
+
+<Table
+  data={{
+    headers: [
+      { content: "Aspect", sortable: false },
+      { content: "Chameleon (discrete VQ-VAE tokens)", sortable: false },
+      { content: "GPT-4o / Gemini (hybrid continuous latent)", sortable: false },
+    ],
+    rows: [
+      ["Image tokenization", "VQ-VAE → discrete codebook IDs in unified vocabulary", "Tile encoder → continuous embeddings prepended to context"],
+      ["Image generation", "Auto-regressive prediction of image tokens, decoded by VQ-VAE decoder", "Transformer emits latents → Latent Diffusion Decoder → pixels"],
+      ["Audio output", "Discrete codec tokens (Post 15)", "Continuous latents → codec decoder"],
+      ["Inter-modal reasoning", "Excellent — single unified context", "Excellent — single unified context"],
+      ["Image quality", "Limited by codebook / VQ-VAE decoder", "Higher — driven by latent diffusion decoder"],
+      ["Stack complexity", "Lower — one transformer, one VQ-VAE", "Higher — transformer + separate diffusion + codec decoders"],
+      ["Open weights?", "Yes (Chameleon-7B, 34B)", "No"],
+    ],
+  }}
+/>
+
+The likely future, predictable from the trade-off table, is **hybrid models that ship both modes**: cheap discrete-token output for in-context preview, high-quality latent-diffusion output when the user asks for the polished version. We're already seeing this with image-edit features that round-trip through diffusion only on the final pass.
+
+## The "what should I generate next?" question
+
+A unified token vocabulary raises an architectural question that doesn't come up for text-only models: **how does the model decide what modality to produce next?**
+
+The answer is the same as everything else a unified transformer does — **it predicts the modality as a token**. The vocabulary contains special **modality-switch tokens**:
+
+- `<|start_of_text|>`
+- `<|start_of_image|>`
+- `<|start_of_audio|>`
+
+(plus matching `end_of_*` tokens.) These are real entries in the embedding table and the output softmax. During inference, after the model finishes one chunk, the very next token it samples might be a modality switch. If it samples `<|start_of_image|>`, the runtime knows: route the next N predicted tokens (until `<|end_of_image|>`) into the image decoder. Same for audio.
+
+There is **no separate "decision circuit"** picking the modality. The model has been trained on documents where the most likely token after "Here's a picture of a sunset:" is `<|start_of_image|>`, and after "Let me explain that out loud:" is `<|start_of_audio|>`. The choice is *pure next-token probability* over a vocabulary that happens to contain modality switches. This is the cleanest possible answer and a real conceptual win — you don't need any new machinery. You just need the right tokens in your vocabulary and the right training data.
+
+## Probabilistic intent
+
+A nice consequence: modality choice is *contextual*, not rule-based. A model never told "you must reply with text" can reply with audio if the user asked for audio. The same prompt, slightly rephrased, can flip the most-likely modality:
+
+- *"Show me a picture of a sunset."* → `p(<|start_of_image|>)` is highest.
+- *"Describe a sunset to me."* → `p(<|start_of_text|>)` is highest.
+- *"Sing me a sunset."* → `p(<|start_of_audio|>)` is highest.
+
+No keyword matching, no intent classifier, no separate router — just the same softmax that decides every other token. (And of course, you can override it with an explicit instruction: "respond in audio" puts an audio-bias on the prefix, and the transformer's normal context-conditioning takes care of the rest.)
+
+## Generating video calls: parallel streams
+
+A video call with sound is multi-stream output: the model has to produce both video frames and audio simultaneously, and they have to stay synchronised. Two patterns are in the wild.
+
+### The "braid" method (interleaved streams)
+
+The simpler one: tokenise the two streams by timestamp and **interleave** them in a single token sequence, just like the early-fusion sync from Post 15:
+
+```
+[Frame-1 visual tokens] [Audio tokens 0–40ms] [Frame-2 visual tokens] [Audio tokens 40–80ms] ...
+```
+
+The same auto-regressive next-token loop generates both. Self-attention does the alignment work — by the time the model is predicting Frame-2's visual tokens, it has already seen Frame-1's visual tokens *and* the matching audio. The KV-cache (Posts 2, 4) holds them all. As long as the training data was structured the same way (which is just a tokeniser-level decision), the model learns to keep the streams in lock-step.
+
+This is the cleaner, smaller architecture. The trade-off is that visual tokens vastly outnumber audio tokens, so the audio stream is a small fraction of the sequence and tends to be lower-fidelity than a dedicated audio model would produce.
+
+### Multi-head latent prediction
+
+The fancier pattern, used in some "omni" models: a single transformer trunk, but **multiple parallel output heads** — one for video latents, one for audio latents — driven by a shared synchronisation clock.
+
+- The trunk does one forward pass per timestep, attending to all prior context across modalities.
+- The output heads emit, in parallel, a video latent and an audio latent at the same timestep.
+- A global sync clock advances both heads together — the diffusion-style denoising for video and audio steps are forced to share a timestep counter, so they can't drift apart.
+
+The trunk is shared, so reasoning is unified; the heads are specialised, so each modality's output quality benefits from a head that's fully dedicated to it. This is more complex but produces better-quality output for either stream. Frontier omni models almost certainly do something like this; the exact details are proprietary.
+
+## Real-time loops
+
+Live video calling adds one more pressure: **latency**. A diffusion model that takes 50 denoising steps to produce a single frame is unusable in a phone call where you're paying every 33ms.
+
+The fix layers techniques from earlier in the course:
+
+- **Streaming prefix.** The model receives the user's input as 200ms chunks, each appended to the live KV-cache, and starts generating tokens as soon as enough context has arrived. (Same as streaming inference from Post 3.)
+- **Speculative decoding.** A small draft model proposes several candidate tokens; the big model verifies in parallel (Post 5).
+- **Distilled consistency models / few-step diffusion.** A teacher diffusion model is distilled into a student that produces visually equivalent output in **1–2 steps instead of 50**. Trades 25–50× latency for a small fidelity hit. (This is the technique behind LCMs, SDXL Turbo, and the real-time generation modes in current systems.)
+
+Stack these together and the model gets to "first audio chunk out the door" in tens of milliseconds, hides any straggling latency under the natural conversational pause humans expect, and stays at the latency budget a phone call demands.
+
+## Course recap
+
+This is the last technical post, so let's draw the line all the way back to Post 1 of *The LLM Internals Course*.
+
+**Part 1 — Inference (Posts 1–6).** A trained model takes input text, tokenises it, embeds it, runs the same transformer layer L times — each layer being attention plus FFN with a residual connection — gets logits, samples the next token, repeats. To make this fast and cheap at scale, we layered: KV-cache (Post 2), batched inference servers (Post 3), PagedAttention/MQA/GQA/FlashAttention/continuous batching/prefix-caching (Post 4), parallelism + speculative decoding + MoE (Post 5), and context-window extension via RoPE/YaRN (Post 6).
+
+**Part 2 — Training (Posts 7–11).** Same model, but trained from random weights with cross-entropy + AdamW + mixed precision + gradient checkpointing (Post 7), distributed across hundreds of GPUs with DP/TP/PP/ZeRO/FSDP (Post 8), then refined with continued pre-training, full fine-tuning, and SFT (Post 9), aligned with RLHF/DPO/PPO + LoRA/QLoRA (Post 10), and finally taught to reason via CoT/STaR/GRPO + distillation (Post 11).
+
+**Part 3 — Multi-Modal (Posts 12–16).** Tokenization tricks for code and dozens of human languages (Post 12). Vision Transformers and CLIP for understanding, plus diffusion + LDM + DiT for generation (Post 13). Spatiotemporal patches, factorised attention, and 3D denoising for video (Post 14). Spectrograms, neural codecs, native end-to-end audio, and the three sync patterns (Post 15). And — this post — native multimodality with VQ-VAE or hybrid latents, modality-switch tokens, and the streaming loops that make real-time multi-stream generation work.
+
+The throughline of the whole series is one architecture: the decoder-only transformer. Posts 1–11 made it faster, bigger, better-aligned, and more capable on text. Posts 12–16 added new tokenizers and new I/O bridges so the same architecture can read and write images, audio, and video. **Almost every "advance" we covered is an optimization of how data enters or leaves the same core block, not a replacement for the block itself.** That's the punchline of the whole course.
+
+## Where to go from here
+
+There's no shortage of frontier work; pick a depth and pace that suits you.
+
+- **Lilian Weng's blog** — long-form, well-cited explainers of frontier topics. A high-signal place to follow the field. <SmartLink href="https://lilianweng.github.io/">lilianweng.github.io</SmartLink>
+- **Sebastian Raschka's *Ahead of AI*** — newsletter that surveys recent papers and frontier methods, with code excerpts. <SmartLink href="https://magazine.sebastianraschka.com/">magazine.sebastianraschka.com</SmartLink>
+- **Stanford CS336 (LLMs from Scratch)** — full lecture course with assignments that have you build a transformer end to end. <SmartLink href="https://stanford-cs336.github.io/">stanford-cs336.github.io</SmartLink>
+- **Hugging Face LLM Course** — practical, code-first walk through the modern LLM stack. <SmartLink href="https://huggingface.co/learn/llm-course">huggingface.co/learn/llm-course</SmartLink>
+- **Andrej Karpathy's YouTube** — Zero to Hero, "Let's build GPT", "Let's reproduce GPT-2", and the "intro to LLMs" lecture. The clearest end-to-end builds available. <SmartLink href="https://www.youtube.com/@AndrejKarpathy">youtube.com/@AndrejKarpathy</SmartLink>
+- **Anthropic Research blog** — for the alignment and interpretability angle the rest of the field doesn't cover well. <SmartLink href="https://www.anthropic.com/research">anthropic.com/research</SmartLink>
+- **Read the source.** vLLM, Hugging Face Transformers, and Hugging Face Diffusers are the three production codebases that implement most of what this course described. Reading their actual implementations of attention, KV-cache, sampling, and diffusion samplers cements everything. <SmartLink href="https://github.com/vllm-project/vllm">github.com/vllm-project/vllm</SmartLink>
+
+Thanks for reading the series. The goal of this course was that an engineer who works through it ends up with the same end-to-end mental model of LLMs that I built for myself. If a topic in here gave you a "huh, I didn't realise that's how it worked" — that was the whole point. Now go build something with it.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Native multimodal models</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Meta AI 2024, "Chameleon: Mixed-Modal Early-Fusion Foundation Models." <SmartLink href="https://arxiv.org/abs/2405.09818">arxiv.org/abs/2405.09818</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      van den Oord et al. 2017, "Neural Discrete Representation Learning" (VQ-VAE). <SmartLink href="https://arxiv.org/abs/1711.00937">arxiv.org/abs/1711.00937</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Esser et al. 2021, "Taming Transformers for High-Resolution Image Synthesis" (VQGAN). <SmartLink href="https://arxiv.org/abs/2012.09841">arxiv.org/abs/2012.09841</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Google DeepMind 2024, "Gemini 1.5: Unlocking multimodal understanding across millions of tokens." <SmartLink href="https://arxiv.org/abs/2403.05530">arxiv.org/abs/2403.05530</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Any-to-any &amp; streaming</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Wu et al. 2023, "NExT-GPT: Any-to-Any Multimodal LLM." <SmartLink href="https://arxiv.org/abs/2309.05519">arxiv.org/abs/2309.05519</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Tang et al. 2023, "CoDi: Any-to-Any Generation via Composable Diffusion." <SmartLink href="https://arxiv.org/abs/2305.11846">arxiv.org/abs/2305.11846</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Luo et al. 2023, "Latent Consistency Models" (few-step distilled diffusion). <SmartLink href="https://arxiv.org/abs/2310.04378">arxiv.org/abs/2310.04378</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Course capstone</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lilian Weng's blog (everything tagged LLM or Multimodal). <SmartLink href="https://lilianweng.github.io/">lilianweng.github.io</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Stanford CS336 — Language Models from Scratch. <SmartLink href="https://stanford-cs336.github.io/">stanford-cs336.github.io</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face LLM Course. <SmartLink href="https://huggingface.co/learn/llm-course">huggingface.co/learn/llm-course</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Andrej Karpathy — Zero to Hero / "Let's build GPT" lecture series. <SmartLink href="https://www.youtube.com/@AndrejKarpathy">youtube.com/@AndrejKarpathy</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Sebastian Raschka, "Ahead of AI" newsletter. <SmartLink href="https://magazine.sebastianraschka.com/">magazine.sebastianraschka.com</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Anthropic Research (interpretability + alignment depth). <SmartLink href="https://www.anthropic.com/research">anthropic.com/research</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>

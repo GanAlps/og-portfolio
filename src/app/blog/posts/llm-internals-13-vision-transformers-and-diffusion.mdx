@@ -1,0 +1,267 @@
+---
+title: "Seeing: Vision Transformers & Diffusion Models"
+subtitle: "Two pipelines for two jobs — understanding images and creating them"
+publishedAt: "2026-05-01"
+summary: "Part 13 of The LLM Internals Course. Image input and image output use entirely different machinery. We trace the Vision Transformer (ViT) pipeline that lets an LLM read an image — patch embedding, CLS token, CLIP-trained projector — then switch to diffusion models, where text becomes pixels through 20–50 rounds of noise prediction. Latent Diffusion, DiT, Stable Diffusion."
+tag: "AI"
+series: "llm-internals-course"
+part: 13
+partTitle: "Vision & Diffusion"
+images: []
+team: []
+---
+
+## Two jobs, two pipelines
+
+A modern multimodal model can do two very different things with images. It can **understand** them — "describe what's in this photo", "read this whiteboard", "what's the bug in this screenshot of code?" — and it can **generate** them — "draw a watercolour of a fox in a forest at dusk".
+
+These two jobs share basically nothing. Image *understanding* uses a Vision Transformer (ViT) that turns a picture into token-shaped vectors a frozen LLM can read. Image *generation* uses a diffusion model that turns text-conditioned Gaussian noise into pixels over 20–50 denoising steps. Different architectures, different training objectives, different inference loops.
+
+Modern systems (GPT-4o, Gemini, Claude with image tools) often package both pipelines together so the user feels one model. Internally they're two distinct stacks bolted to a common LLM. This post walks each stack from input to output.
+
+## From pixels to patches
+
+A Vision Transformer starts the way any transformer does: it needs a sequence of tokens. Images don't come pre-tokenised, so the first job is to manufacture a token sequence out of pixels.
+
+Take an input image at standard ViT resolution: 224×224 pixels, 3 channels (RGB). Slice it into a 14×14 grid of non-overlapping 16×16 patches. Each patch is now a small block of 16 × 16 × 3 = 768 numbers. Flatten that block, and you have a 768-dimensional vector — one "patch embedding" per patch, 196 patches per image.
+
+This is conceptually identical to text tokenisation. A 224×224 image becomes a sequence of 196 patch vectors, each 768-dim. From here on, the transformer doesn't know it's looking at an image.
+
+A small implementation detail: in practice the patch embedding is implemented as a single 2-D convolution with kernel size 16 and stride 16. Same arithmetic, faster code path on GPUs.
+
+<Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/vit-fig1.png" alt="Vision Transformer architecture diagram from Dosovitskiy 2020 ViT paper. Left side shows the full ViT pipeline: an input image is split into a 3-by-3 grid of patches at the bottom, each patch goes through a Linear Projection of Flattened Patches layer to produce a sequence of patch embeddings labelled 1 through 9, with a special learnable [class] token labelled 0 prepended at the front. Position embeddings are added to all 10 tokens. The full sequence then enters a Transformer Encoder block. The output corresponding to the [class] token is fed into an MLP Head that produces classification logits like Bird, Ball, Car. Right side shows the internals of one Transformer Encoder block: Embedded Patches enter a Norm layer, then Multi-Head Attention with a residual connection, then Norm again, then MLP with another residual connection. The block is repeated L times." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2010.11929">Dosovitskiy et al. 2020, "An Image Is Worth 16×16 Words" (ViT)</SmartLink>, Figure 1. The pipeline is intentionally as text-transformer-like as possible: patch embedding plays the role of token embedding, the [CLS] token plays the role of a special pooling token, and the encoder block on the right is the standard pre-norm transformer.
+</Text>
+
+## The CLS token and position embeddings
+
+Before the patch sequence enters the transformer, two additions:
+
+1. **A learnable [CLS] token** is prepended to the front. This is a 768-dim vector with no a-priori meaning — its parameters are learned during training. The CLS token's job is to *gather* information from the rest of the sequence as the layers process it, so that by the final layer its representation can be linearly mapped to the desired output (e.g. a class label).
+2. **Position embeddings** are added element-wise to all 197 vectors (196 patches + CLS). Without them, attention is permutation-invariant — the transformer wouldn't know top-left from bottom-right. ViT typically uses learned 1-D position embeddings (one per position 0…196), even though the patches are originally 2-D; the model figures out the 2-D structure during training.
+
+That's the whole input pipeline. From here, it's a vanilla transformer encoder.
+
+## Through the transformer
+
+Now the 197 vectors flow through L stacked transformer blocks (L = 12 for ViT-Base, 24 for ViT-Large, 32 for ViT-Huge), each containing multi-head self-attention + an MLP, exactly as in Posts 1 and 2.
+
+The attention mechanics are the same as text, with one important consequence: **the CLS token attends to every patch, and every patch attends to every other patch**. That means two things happen in parallel as you go up the layers:
+
+- The **CLS token** keeps absorbing context from the patches. By the final layer, its 768-dim representation is essentially a summary vector of the whole image.
+- Each **patch token** also gets refined — picking up context from nearby patches (then any patch, by later layers). A patch in the corner that sees a piece of fur learns the rest of the image is a dog; that information lands in the patch's representation.
+
+This dual outcome is why ViT is useful for both classification (use the CLS token) and dense prediction (use the patch tokens) — and why, when we hook it up to an LLM, we'll feed *both* the CLS and the 196 patch tokens forward.
+
+## Output: from CLS to a prediction
+
+ViT was trained originally on ImageNet classification. The original head is dead simple:
+
+- Take the final-layer CLS token (768-dim).
+- Linearly project to 1000-dim (one logit per ImageNet class).
+- Softmax → predicted class.
+
+That's it. The 196 patch tokens at the final layer are *also* available — ViT just doesn't use them for vanilla classification. They become the load-bearing output when we plug ViT into an LLM, which is the next move.
+
+## Plugging ViT into an LLM: the projector
+
+A frozen LLM expects token embeddings of dimension `d_model` (4096 for Llama-7B, 5120 for Llama-13B, etc.). ViT outputs 768-dim or 1024-dim patch tokens. Even if the dimensions matched, the *embedding spaces* don't — ViT's vector for a patch of fur lives in a different coordinate system than Llama's vector for the word "fur".
+
+The bridge between them is a small **projector** (sometimes called the "vision-language adapter" or "Q-Former"), almost always a 2-layer MLP. It maps each ViT patch token from ViT's space to the LLM's embedding space — a learned linear+nonlinear+linear stack that takes a 768-dim ViT vector in and produces a 4096-dim Llama-shaped vector out.
+
+The projected patch tokens are then prepended to the LLM's normal text tokens, exactly the way a text prompt is fed in. The LLM "sees" the image as a prefix of, say, 256 visual tokens followed by the user's text question. Self-attention does the rest — text tokens attend to visual tokens just like they would attend to earlier text tokens.
+
+<Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/llava-fig1.png" alt="LLaVA architecture diagram showing how a Vision Encoder, a Projection layer W, and a frozen Language Model f-phi connect. Input image X_v feeds into the Vision Encoder which outputs visual features Z_v. Those features pass through Projection W to produce H_v, a sequence of visual tokens in the LLM's embedding space. A separate Language Instruction X_q is tokenized into H_q. Both H_v (visual tokens) and H_q (text tokens) feed as a single sequence into the Language Model, which generates the Language Response X_a token by token." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2304.08485">Liu et al. 2023, "Visual Instruction Tuning" (LLaVA)</SmartLink>, Figure 1. The projector W is the only new module — vision encoder and language model are both frozen pre-trained components. This is the modern recipe for image-understanding multimodal models: bring your own ViT, bring your own LLM, train a small bridge between them.
+</Text>
+
+## CLIP: how the visual encoder learned in the first place
+
+The story above assumes ViT already produces patch vectors that "mean something". That doesn't happen by accident. The pre-training that makes ViT useful for downstream tasks — especially for hooking it up to a language model — is **contrastive image-text training**, popularised as CLIP (Radford et al. 2021).
+
+CLIP trains two encoders simultaneously:
+
+- A **visual encoder** (a ViT) that maps an image to a feature vector.
+- A **text encoder** (a small transformer) that maps a caption to a feature vector.
+
+On a batch of N (image, caption) pairs:
+
+- Compute all N image vectors and all N text vectors.
+- Compute the N × N matrix of cosine similarities between every image and every caption.
+- Maximise similarity on the **diagonal** (matching pairs) and minimise it everywhere off-diagonal (non-matching pairs).
+
+The whole batch becomes one giant contrastive learning problem. The training signal at the level of a single pair is the InfoNCE loss:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/eq-clip-loss.svg" alt="CLIP InfoNCE contrastive loss: negative one over N times the sum over i of log of exp of similarity of image I sub i and text T sub i divided by temperature tau, all divided by the sum over j of exp of similarity of I sub i and T sub j divided by tau" style={{ maxWidth: "560px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  CLIP's contrastive loss (image → text direction). Each image's matching caption should score higher than every other caption in the batch. The temperature τ controls how sharp the softmax is. The full CLIP loss averages this with the symmetric text → image direction.
+</Text>
+
+<Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/clip-fig1.png" alt="CLIP training and zero-shot classification diagram. Left panel labelled (1) Contrastive pre-training: a batch of images flows into an Image Encoder producing vectors I_1 to I_N, and a batch of corresponding captions flows into a Text Encoder producing vectors T_1 to T_N. The two streams meet in an N-by-N similarity matrix where diagonal entries (matching image-caption pairs) are highlighted blue and off-diagonal entries (mismatched pairs) are white — the loss pushes diagonal high, off-diagonal low. Middle panel (2) Create dataset classifier from label text: class names like plane, car, dog, bird are templated into A photo of a [object] and run through the Text Encoder to produce a row of class vectors. Right panel (3) Use for zero-shot prediction: a new image is run through the Image Encoder to produce I_1, the dot product with each class vector picks the highest-scoring class — A photo of a dog." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2103.00020">Radford et al. 2021, "CLIP"</SmartLink>, Figure 1. The same trained vision encoder that powers zero-shot classification (panels 2–3) is the one that gets reused as the image-understanding front end for downstream multimodal LLMs. CLIP-pretrained ViTs are now the standard input adapter for vision-language models.
+</Text>
+
+The result: a ViT whose feature vectors are *aligned with language*. A patch of fur produces a vector close to the text vector for "dog"; a patch of sky produces one close to "sky". Exactly the property we need before plugging into an LLM through a small projector.
+
+CLIP was trained on 400M (image, alt-text) pairs scraped from the public web — the largest, weakest-supervised image-text corpus assembled at the time. The "from natural language supervision" framing is the headline: no human-curated class labels, just whatever caption the image came with on the internet.
+
+## Three-stage training of an image-understanding LLM
+
+Putting the pieces together, a modern vision-language model (LLaVA, MiniGPT, Qwen-VL) is trained in three stages on top of two strong frozen pre-trained components:
+
+1. **Pre-train the visual encoder with CLIP.** This step is usually done by someone else; you download a CLIP-trained ViT off the shelf.
+2. **Train only the projector.** Freeze the ViT and the LLM. Run image+caption pairs through ViT → projector → LLM, with the LLM producing a text completion. Compute language-modelling loss, backprop only through the projector. This stage aligns the projector's output to the LLM's expected embedding space — and because only one small MLP has trainable parameters, it's quick and cheap.
+3. **(Optional) LoRA fine-tune the LLM.** Unfreeze a small LoRA adapter (Post 10) on the LLM and train on instruction-following image+text data ("describe this", "what's wrong with this code screenshot?"). This stage teaches the LLM how to *use* visual context in conversation.
+
+Notice how every box in this recipe maps to a technique from earlier in the course: contrastive pre-training (this post), frozen-base + small-bridge fine-tuning (Post 10), instruction tuning (Post 9), LoRA (Post 10). No new ideas — the three stages are an application of recipes you've already seen.
+
+## Pivot: now we want to create images
+
+Everything above takes pixels in and produces text out. To go the other direction — text in, pixels out — none of the above machinery applies. ViT can read an image but cannot draw one; auto-regressive next-token prediction works for discrete tokens but generating an image one pixel at a time would mean ~196 K decoder steps for a 256×256 image (and the early pixels would have no context for the late ones).
+
+The dominant solution is **diffusion models**. They generate an image not token-by-token but as a whole, by iteratively denoising a noise field over 20–50 steps until it resolves into a coherent picture.
+
+## The diffusion forward process: just adding noise
+
+Diffusion training starts from real images and gradually destroys them. Take an image `x_0`, then for `t = 1, 2, …, T` (typically T = 1000), repeatedly add a tiny amount of Gaussian noise so that each `x_t` is the previous step plus a scaled fresh Gaussian sample. The schedule of mixing coefficients (the "noise schedule") is calibrated so that by time T, the image has been so corrupted by noise that it's *indistinguishable from pure Gaussian noise*. That's the "forward process" — a deterministic recipe for blowing an image up into noise.
+
+<Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/ddpm-fig2.png" alt="DDPM directed graphical model. A row of circles labeled x_T (leftmost, gray = noise) → ... → x_t → x_(t-1) → ... → x_0 (rightmost, white = real image). A solid rightward arrow labeled p_theta(x_(t-1) | x_t) goes from x_t to x_(t-1) (the reverse process, the model's job). A dashed leftward arrow labeled q(x_t | x_(t-1)) goes from x_(t-1) back to x_t (the forward noising process, fixed). Below the chain, small image thumbnails show: pure noise on the far left, partially noised faces in the middle, and a clear face on the far right — the trajectory the model traces during sampling." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2006.11239">Ho et al. 2020, "Denoising Diffusion Probabilistic Models"</SmartLink>, Figure 2. The forward process q (dashed arrows) is fixed and adds noise. The reverse process p_θ (solid arrow) is what the network learns: given a noisier x_t, predict the slightly less noisy x_(t−1). Sampling traces this reverse process from pure noise to image.
+</Text>
+
+The point of the forward process isn't generation — it's manufacturing supervised training data. For any real image, we can pick any t, run the forward process to get a noisy version x_t, and now have a labelled training pair: input *x_t* + the actual added noise *ε*.
+
+## Reverse process: predict the noise to remove
+
+The model's job is to *invert* the forward process — given a noisy image x_t and the timestep t, predict the noise that was added to produce it:
+
+<Column horizontal="center" fillWidth>
+  <Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/eq-diffusion-loss.svg" alt="Diffusion training loss: L_simple equals the expectation over t, x_0, and epsilon, of the squared L2 norm of epsilon minus epsilon_theta of x_t, t, c" style={{ maxWidth: "520px", width: "100%" }} />
+</Column>
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  The diffusion training objective. We are not predicting the image — we are predicting the noise we have to remove. The conditioning signal c is the text prompt for text-to-image models. ε_θ is the network's noise prediction.
+</Text>
+
+Notice what we're predicting: **noise**, not pixels. This is the single most counter-intuitive thing about diffusion models. Subtract the predicted noise from x_t and you get a slightly cleaner image x_(t−1). Repeat. Repeat again.
+
+At inference time the loop is:
+
+1. Start from x_T = pure Gaussian noise.
+2. For t = T, T−1, …, 1:
+   - Predict the noise ε_θ(x_t, t, c) given current state and the text condition c.
+   - Subtract a scaled portion → x_(t−1).
+   - **Re-inject a tiny amount of fresh noise.** (Critical: see below.)
+3. Output x_0.
+
+After 20–50 iterations (modern fast samplers like DDIM and DPM-Solver get away with far fewer than the 1000 training steps), the noise has resolved into an image whose feature-space embedding aligns with the input text — exactly because the network was trained on image-text pairs whose CLIP embeddings matched.
+
+The early steps do *coarse* work: rough composition, where things go on the canvas. Later steps do *fine* work: textures, edges, small details. The noise schedule is specifically calibrated so that early subtractions take large jumps and late ones take tiny ones — the diffusion analogue of starting with a high learning rate and decaying it.
+
+### Why a small re-noise after each step matters
+
+If you naïvely subtract the predicted noise without re-injecting any, the output comes out *blurry*. The reason is that the noise prediction at any step is necessarily an *expected* noise — the average over many possible plausible cleaner images that could have produced x_t. Subtracting an expectation kills the high-frequency detail that distinguishes one real sample from another. Re-adding a small amount of fresh stochastic noise breaks the model out of the "everything-averaged" regime and lets it commit to a specific sample on the next step.
+
+This is identical to why beam search produces blander text than temperature sampling — averaging over plausible outcomes gives you the centroid, not a specimen.
+
+## Diffusion Transformers (DiT) — and the U-Net it replaced
+
+Until 2022, the standard backbone for the noise-predictor ε_θ was a **U-Net**: a convolutional encoder-decoder with skip connections that downsample then upsample the noisy image. U-Net was inherited from medical-image segmentation; its inductive biases (locality, translation equivariance) work well on images and it dominated diffusion for years. Stable Diffusion 1 and 2, every original DDPM result, and most early text-to-image systems use U-Net backbones.
+
+Peebles & Xie's **Diffusion Transformer (DiT)** showed that U-Net's inductive biases are no longer load-bearing once you have enough data and compute. Replace U-Net with a transformer that operates on the noisy image's *patch tokens* (exactly like ViT does for understanding) and you get cleaner scaling laws — bigger DiT → better generation, with the same predictability transformers showed in Posts 7–8.
+
+<Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/dit-fig3.png" alt="Diffusion Transformer (DiT) architecture diagram. Left side shows the overall flow: a Noised Latent of shape 32x32x4 enters a Patchify step then an Embed step alongside a Timestep t and Label y embedding. The combined sequence enters N stacked DiT Blocks, then exits through Layer Norm, Linear and Reshape to produce two outputs: Noise prediction (32x32x4) and Sigma (32x32x4). Right side shows three variants of DiT block design: DiT Block with adaLN-Zero (the leading variant — Layer Norm with scale-shift conditioning gamma and beta from the conditioning signal, then Multi-Head Self-Attention with residual scale alpha, then Layer Norm scale-shift, then Pointwise Feedforward, all with skip connections), DiT Block with Cross-Attention (replaces conditioning injection with explicit cross-attention to the conditioning signal), and DiT Block with In-Context Conditioning (concatenates conditioning into the sequence dimension)." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2212.09748">Peebles &amp; Xie 2022, "Scalable Diffusion Models with Transformers" (DiT)</SmartLink>, Figure 3. The DiT block is just a standard transformer block with one wrinkle: the timestep t and the conditioning signal (text embedding or class label) modulate the layer norms via scale-shift parameters (γ, β). This is what lets the same transformer condition its prediction on "step 47 of 1000, prompt = a fox in a forest".
+</Text>
+
+DiT is the architecture behind OpenAI's Sora, Stability's SD3, and most current frontier video/image generators. The lineage from text transformer → ViT → DiT is essentially uninterrupted: same self-attention, same residual blocks, just patches instead of tokens and timestep+text conditioning instead of next-token prediction.
+
+## Latent Diffusion Models (LDM)
+
+There's one more critical optimization layered on top of every modern diffusion system, and it predates DiT: instead of running diffusion in pixel space (where a 512×512 image is 786 K dimensions), run it in a *compressed latent space*.
+
+The compressor is a **VAE** — Variational Autoencoder. Briefly: a VAE is a pair of trained neural networks. The encoder ℰ maps a high-dimensional image to a small latent code z. The decoder 𝒟 maps z back to a reconstruction of the original image. The two are trained together end-to-end: minimise reconstruction error, plus a soft regularisation that keeps the latent space well-behaved (so nearby points in z decode to nearby-looking images). For a 512×512 RGB image, a typical VAE compresses 786 K dimensions down to a 64×64×4 latent — about 50× smaller, with little perceptible loss when decoded back.
+
+Latent diffusion is then straightforward:
+
+1. Encode the training image to its latent z₀ once via the VAE encoder.
+2. Run the entire diffusion forward + reverse process *on the latent z*, not on pixels.
+3. After the final denoising step produces a clean latent ẑ₀, run it through the VAE decoder to recover a full-resolution image.
+
+<Media src="/images/blog/llm-internals-13-vision-transformers-and-diffusion/ldm-fig3.png" alt="Latent Diffusion Model architecture from Rombach 2022. Left: Pixel Space — input image x enters VAE encoder ℰ producing latent z; reverse path: predicted clean latent enters VAE decoder 𝒟 producing reconstructed image x-tilde. Center: Latent Space (the green box) — diffusion process runs entirely on the latent. The Denoising U-Net ε_θ operates on noisy latents z_T, z_(T-1), etc., with cross-attention layers (Q-K-V boxes) that attend to a conditioning input. Right: Conditioning — semantic maps, text, representations, or other images flow through a domain-specific encoder τ_θ into the cross-attention layers of the U-Net. The diffusion process happens iteratively in the small latent space, decoded back to pixels only at the end." />
+<Text variant="label-default-xs" onBackground="neutral-weak" align="center">
+  Source: <SmartLink href="https://arxiv.org/abs/2112.10752">Rombach et al. 2022, "High-Resolution Image Synthesis with Latent Diffusion Models" (Stable Diffusion)</SmartLink>, Figure 3. Pixel-space diffusion (the previous norm) was prohibitively expensive at high resolution. Latent diffusion runs the same denoising loop on a 50× smaller representation. Stable Diffusion is the most-deployed open-weights instance of this architecture — DiT can be dropped in to replace the U-Net inside the green Latent Space box.
+</Text>
+
+Two enormous savings come from this: every denoising step does ~50× less work, and the VAE encoder/decoder run only twice (once at the start during training, once at the end during sampling) so their cost is amortised. **Stable Diffusion** is the open-source incarnation of LDM that made text-to-image generation cheap enough to run on a single consumer GPU; almost every diffusion system shipped after 2022 follows the same recipe, with U-Net or DiT swapped inside the latent loop.
+
+## Coming up next
+
+This post covered the two pipelines for one modality — images. The next pulls in the *temporal* dimension and the entirely separate world of audio.
+
+**Post 14: Hearing & Watching — Audio, Video, and the Temporal Dimension.** Spatiotemporal patches for video, factorised attention, 3-D RoPE, the Temporal Resampler trick, sliding-window streaming, spectrogram vs neural-codec audio representations, audio-video sync (early/late fusion, CLAP, Sora-style joint diffusion). The "two pipelines" pattern from this post extends — understanding pipelines and generation pipelines diverge in audio and video too — but with extra machinery for handling time.
+
+---
+
+<FurtherReading>
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Vision Transformers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Dosovitskiy et al. 2020, "An Image Is Worth 16×16 Words" (ViT). <SmartLink href="https://arxiv.org/abs/2010.11929">arxiv.org/abs/2010.11929</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Radford et al. 2021, "Learning Transferable Visual Models From Natural Language Supervision" (CLIP). <SmartLink href="https://arxiv.org/abs/2103.00020">arxiv.org/abs/2103.00020</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Liu et al. 2023, "Visual Instruction Tuning" (LLaVA). <SmartLink href="https://arxiv.org/abs/2304.08485">arxiv.org/abs/2304.08485</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Rohan Paul, "Decoding Vision Transformer (ViT)." <SmartLink href="https://outcomeschool.com/blog/decoding-vision-transformer-vit">outcomeschool.com</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Diffusion models</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Ho et al. 2020, "Denoising Diffusion Probabilistic Models" (DDPM). <SmartLink href="https://arxiv.org/abs/2006.11239">arxiv.org/abs/2006.11239</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Rombach et al. 2022, "High-Resolution Image Synthesis with Latent Diffusion Models" (Stable Diffusion). <SmartLink href="https://arxiv.org/abs/2112.10752">arxiv.org/abs/2112.10752</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Peebles &amp; Xie 2022, "Scalable Diffusion Models with Transformers" (DiT). <SmartLink href="https://arxiv.org/abs/2212.09748">arxiv.org/abs/2212.09748</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Visual explainers</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Lilian Weng, "What are Diffusion Models?" <SmartLink href="https://lilianweng.github.io/posts/2021-07-11-diffusion-models/">lilianweng.github.io</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Jay Alammar, "The Illustrated Stable Diffusion." <SmartLink href="https://jalammar.github.io/illustrated-stable-diffusion/">jalammar.github.io</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face, "The Annotated Diffusion Model." <SmartLink href="https://huggingface.co/blog/annotated-diffusion">huggingface.co/blog/annotated-diffusion</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      DeepLizard, "Diffusion Models — Course." <SmartLink href="https://deeplizard.com/course/dicpailzrd">deeplizard.com</SmartLink>
+    </Text>
+  </Column>
+
+  <Column gap="4">
+    <Text variant="label-strong-s" onBackground="neutral-weak">Code and tools</Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Hugging Face Diffusers library. <SmartLink href="https://huggingface.co/docs/diffusers">huggingface.co/docs/diffusers</SmartLink>
+    </Text>
+    <Text variant="body-default-s" onBackground="neutral-medium">
+      Stable Diffusion repository. <SmartLink href="https://github.com/CompVis/stable-diffusion">github.com/CompVis/stable-diffusion</SmartLink>
+    </Text>
+  </Column>
+</FurtherReading>
