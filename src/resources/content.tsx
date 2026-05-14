@@ -78,6 +78,10 @@ const about: About = {
     display: false,
     link: "",
   },
+  resume: {
+    display: true,
+    label: "Resume",
+  },
   intro: {
     display: true,
     title: "Introduction",
