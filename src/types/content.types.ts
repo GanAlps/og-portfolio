@@ -127,6 +127,14 @@ export interface About extends BasePageConfig {
     /** Link to the calendar */
     link: string;
   };
+  /** Resume link configuration. The actual file source is configured via the
+   *  RESUME_DRIVE_URL env var and served by the /api/resume route. */
+  resume: {
+    /** Whether to display the resume link on the about page */
+    display: boolean;
+    /** Label shown on the resume button */
+    label: string;
+  };
   /** Introduction section */
   intro: {
     /** Whether to display the introduction */

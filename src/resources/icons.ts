@@ -15,6 +15,7 @@ import {
   HiOutlineChatBubbleLeftRight,
   HiOutlineXMark,
   HiOutlineArrowPath,
+  HiOutlineArrowDownTray,
 } from "react-icons/hi2";
 
 import {
@@ -73,6 +74,7 @@ export const iconLibrary: Record<string, IconType> = {
   threads: FaThreads,
   arrowUpRightFromSquare: HiArrowTopRightOnSquare,
   document: HiOutlineDocument,
+  download: HiOutlineArrowDownTray,
   rocket: HiOutlineRocketLaunch,
   javascript: SiJavascript,
   nextjs: SiNextdotjs,
